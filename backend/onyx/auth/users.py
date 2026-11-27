@@ -512,7 +512,9 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
                     # object triggers a sync lazy-load which raises MissingGreenlet
                     # in this async context.
                     user_id = user.id
-                    self._upgrade_user_to_standard__sync(user_id, user_create)
+                    self._upgrade_user_to_standard__sync(
+                        user_id, user_create, safe=safe
+                    )
                     # Expire so the async session re-fetches the row updated by
                     # the sync session above.
                     self.user_db.session.expire(user)
@@ -540,7 +542,9 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
                     # object triggers a sync lazy-load which raises MissingGreenlet
                     # in this async context.
                     user_id = user.id
-                    self._upgrade_user_to_standard__sync(user_id, user_create)
+                    self._upgrade_user_to_standard__sync(
+                        user_id, user_create, safe=safe
+                    )
                     # Expire so the async session re-fetches the row updated by
                     # the sync session above.
                     self.user_db.session.expire(user)
@@ -585,19 +589,25 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         self,
         user_id: uuid.UUID,
         user_create: UserCreate,
+        safe: bool,
     ) -> None:
         """Upgrade a non-web user to STANDARD and assign default groups atomically.
 
         All writes happen in a single sync transaction so neither the field
         update nor the group assignment is visible without the other.
+
+        When `safe` is True (public self-registration), `user_create` comes
+        from an untrusted request body, so its `is_verified` is ignored and the
+        account must go through the normal email verification flow.
         """
+        is_verified = False if safe else bool(user_create.is_verified)
         with get_session_with_current_tenant() as sync_db:
             sync_user = sync_db.query(User).filter(User.id == user_id).first()  # type: ignore[arg-type]
             if sync_user:
                 sync_user.hashed_password = self.password_helper.hash(
                     user_create.password
                 )
-                sync_user.is_verified = user_create.is_verified or False
+                sync_user.is_verified = is_verified
                 sync_user.role = user_create.role
                 sync_user.account_type = AccountType.STANDARD
                 assign_user_to_default_groups__no_commit(
