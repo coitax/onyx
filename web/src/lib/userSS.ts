@@ -3,6 +3,7 @@ import { User } from "./types";
 import { buildUrl, UrlBuilder } from "./utilsSS";
 import { ReadonlyRequestCookies } from "next/dist/server/web/spec-extension/adapters/request-cookies";
 import { AuthType, NEXT_PUBLIC_CLOUD_ENABLED } from "./constants";
+import { validateInternalRedirect } from "@/lib/auth/redirectValidation";
 
 export interface AuthTypeMetadata {
   authType: AuthType;
@@ -102,21 +103,22 @@ export const getAuthUrlSS = async (
   nextUrl: string | null
 ): Promise<string> => {
   // Returns the auth url for the given auth type
+  const safeNextUrl = validateInternalRedirect(nextUrl);
 
   switch (authType) {
     case AuthType.BASIC:
       return "";
     case AuthType.GOOGLE_OAUTH: {
-      return await getGoogleOAuthUrlSS(nextUrl);
+      return await getGoogleOAuthUrlSS(safeNextUrl);
     }
     case AuthType.CLOUD: {
-      return await getGoogleOAuthUrlSS(nextUrl);
+      return await getGoogleOAuthUrlSS(safeNextUrl);
     }
     case AuthType.SAML: {
-      return await getSAMLAuthUrlSS(nextUrl);
+      return await getSAMLAuthUrlSS(safeNextUrl);
     }
     case AuthType.OIDC: {
-      return await getOIDCAuthUrlSS(nextUrl);
+      return await getOIDCAuthUrlSS(safeNextUrl);
     }
   }
 };
