@@ -29,6 +29,7 @@ from onyx import __version__
 from onyx.auth.schemas import UserCreate
 from onyx.auth.schemas import UserRead
 from onyx.auth.schemas import UserUpdate
+from onyx.auth.user_auth_secret import get_user_auth_secret
 from onyx.auth.users import auth_backend
 from onyx.auth.users import create_onyx_oauth_router
 from onyx.auth.users import fastapi_users
@@ -52,7 +53,6 @@ from onyx.configs.app_configs import POSTGRES_API_SERVER_POOL_SIZE
 from onyx.configs.app_configs import POSTGRES_API_SERVER_READ_ONLY_POOL_OVERFLOW
 from onyx.configs.app_configs import POSTGRES_API_SERVER_READ_ONLY_POOL_SIZE
 from onyx.configs.app_configs import SYSTEM_RECURSION_LIMIT
-from onyx.configs.app_configs import USER_AUTH_SECRET
 from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.configs.constants import AuthType
 from onyx.configs.constants import POSTGRES_WEB_APP_NAME
@@ -565,7 +565,7 @@ def get_application(lifespan_override: Lifespan | None = None) -> FastAPI:
             create_onyx_oauth_router(
                 oauth_client,
                 auth_backend,
-                USER_AUTH_SECRET,
+                get_user_auth_secret,
                 associate_by_email=True,
                 is_verified_by_default=True,
                 redirect_url=f"{WEB_DOMAIN}/auth/oauth/callback",
@@ -603,7 +603,7 @@ def get_application(lifespan_override: Lifespan | None = None) -> FastAPI:
                     base_scopes=oidc_scopes,
                 ),
                 auth_backend,
-                USER_AUTH_SECRET,
+                get_user_auth_secret,
                 associate_by_email=True,
                 is_verified_by_default=True,
                 redirect_url=f"{WEB_DOMAIN}/auth/oidc/callback",

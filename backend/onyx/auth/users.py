@@ -7,6 +7,7 @@ import secrets
 import string
 import uuid
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -80,6 +81,7 @@ from onyx.auth.pat import get_hashed_pat_from_request
 from onyx.auth.schemas import AuthBackend
 from onyx.auth.schemas import UserCreate
 from onyx.auth.schemas import UserRole
+from onyx.auth.user_auth_secret import get_user_auth_secret
 from onyx.configs.app_configs import AUTH_BACKEND
 from onyx.configs.app_configs import AUTH_COOKIE_EXPIRE_TIME_SECONDS
 from onyx.configs.app_configs import AUTH_TYPE
@@ -349,10 +351,16 @@ def enforce_seat_limit(db_session: Session, seats_needed: int = 1) -> None:
 
 
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
-    reset_password_token_secret = USER_AUTH_SECRET
-    verification_token_secret = USER_AUTH_SECRET
     verification_token_lifetime_seconds = AUTH_COOKIE_EXPIRE_TIME_SECONDS
     user_db: SQLAlchemyUserDatabase[User, uuid.UUID]
+
+    @property  # type: ignore[override]
+    def reset_password_token_secret(self) -> SecretType:
+        return get_user_auth_secret()
+
+    @property  # type: ignore[override]
+    def verification_token_secret(self) -> SecretType:
+        return get_user_auth_secret()
 
     async def get_by_email(self, user_email: str) -> User:
         tenant_id = fetch_ee_implementation_or_noop(
@@ -1869,7 +1877,7 @@ def get_pkce_cookie_name(state: str) -> str:
 def create_onyx_oauth_router(
     oauth_client: BaseOAuth2,
     backend: AuthenticationBackend,
-    state_secret: SecretType,
+    state_secret: SecretType | Callable[[], SecretType],
     redirect_url: Optional[str] = None,
     associate_by_email: bool = False,
     is_verified_by_default: bool = False,
@@ -1891,7 +1899,7 @@ def get_oauth_router(
     oauth_client: BaseOAuth2,
     backend: AuthenticationBackend,
     get_user_manager: UserManagerDependency[models.UP, models.ID],
-    state_secret: SecretType,
+    state_secret: SecretType | Callable[[], SecretType],
     redirect_url: Optional[str] = None,
     associate_by_email: bool = False,
     is_verified_by_default: bool = False,
@@ -1904,8 +1912,15 @@ def get_oauth_router(
     csrf_token_cookie_samesite: Optional[Literal["lax", "strict", "none"]] = "lax",
     enable_pkce: bool = False,
 ) -> APIRouter:
-    """Generate a router with the OAuth routes."""
+    """Generate a router with the OAuth routes.
+
+    `state_secret` may be a callable so the key is resolved per request.
+    """
     router = APIRouter()
+
+    def resolve_state_secret() -> SecretType:
+        return state_secret() if callable(state_secret) else state_secret
+
     callback_route_name = f"oauth:{oauth_client.name}.{backend.name}.callback"
 
     if redirect_url is not None:
@@ -1958,7 +1973,7 @@ def get_oauth_router(
             "referral_source": referral_source or "default_referral",
             CSRF_TOKEN_KEY: csrf_token,
         }
-        state = generate_state_token(state_data, state_secret)
+        state = generate_state_token(state_data, resolve_state_secret())
         pkce_cookie: tuple[str, str] | None = None
 
         if enable_pkce:
@@ -2085,7 +2100,7 @@ def get_oauth_router(
         def decode_and_validate_state(state_value: str) -> Dict[str, str]:
             try:
                 state_data = decode_jwt(
-                    state_value, state_secret, [STATE_TOKEN_AUDIENCE]
+                    state_value, resolve_state_secret(), [STATE_TOKEN_AUDIENCE]
                 )
             except jwt.DecodeError:
                 raise OnyxError(
