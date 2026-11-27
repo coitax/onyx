@@ -38,7 +38,6 @@ from onyx.configs.constants import MessageType
 from onyx.configs.constants import MilestoneRecordType
 from onyx.configs.constants import PUBLIC_API_TAGS
 from onyx.configs.model_configs import LITELLM_PASS_THROUGH_HEADERS
-from onyx.db.chat import add_chats_to_session_from_slack_thread
 from onyx.db.chat import delete_all_chat_sessions_for_user
 from onyx.db.chat import delete_chat_session
 from onyx.db.chat import duplicate_chat_session_for_user_from_slack
@@ -844,17 +843,10 @@ def seed_chat_from_slack(
     user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> SeedChatFromSlackResponse:
-    slack_chat_session_id = chat_seed_request.chat_session_id
     new_chat_session = duplicate_chat_session_for_user_from_slack(
         db_session=db_session,
         user=user,
-        chat_session_id=slack_chat_session_id,
-    )
-
-    add_chats_to_session_from_slack_thread(
-        db_session=db_session,
-        slack_chat_session_id=slack_chat_session_id,
-        new_chat_session_id=new_chat_session.id,
+        chat_session_id=chat_seed_request.chat_session_id,
     )
 
     return SeedChatFromSlackResponse(

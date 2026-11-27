@@ -1,11 +1,11 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import Tuple
 from uuid import UUID
 
-from fastapi import HTTPException
 from sqlalchemy import delete
 from sqlalchemy import desc
 from sqlalchemy import func
@@ -33,6 +33,8 @@ from onyx.db.models import SearchDoc as DBSearchDoc
 from onyx.db.models import ToolCall
 from onyx.db.models import User
 from onyx.db.persona import get_best_persona_id_for_user
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import FileDescriptor
 from onyx.llm.override_models import LLMOverride
@@ -246,46 +248,101 @@ def create_chat_session(
     return chat_session
 
 
+@dataclass(frozen=True)
+class _SlackSeedMessage:
+    message: str
+    files: list[FileDescriptor] | None
+    error: str | None
+    token_count: int
+    message_type: MessageType
+    reasoning_tokens: str | None
+
+
 def duplicate_chat_session_for_user_from_slack(
     db_session: Session,
     user: User,
     chat_session_id: UUID,
 ) -> ChatSession:
     """
-    This takes a chat session id for a session in Slack and:
-    - Creates a new chat session in the DB
-    - Tries to copy the persona from the original chat session
-        (if it is available to the user clicking the button)
-    - Sets the user to the given user (if provided)
+    Copies an OnyxBot (Slack) chat session into a new web chat session owned
+    by `user`. Only OnyxBot sessions owned by `user` or by no one can be copied.
+
+    The source session and its messages are read in a single statement, and
+    only that snapshot is copied, so rows that are attached to the session id
+    afterwards are never picked up. Nothing is written if the session is not
+    eligible.
     """
-    chat_session = get_chat_session_by_id(
-        chat_session_id=chat_session_id,
-        user_id=None,  # Ignore user permissions for this
-        db_session=db_session,
-    )
-    if not chat_session:
-        raise HTTPException(status_code=400, detail="Invalid Chat Session ID provided")
+    rows = db_session.execute(
+        select(ChatSession, ChatMessage)
+        .outerjoin(ChatMessage, ChatMessage.chat_session_id == ChatSession.id)
+        .where(
+            ChatSession.id == chat_session_id,
+            ChatSession.onyxbot_flow.is_(True),
+            ChatSession.deleted.is_(False),
+            or_(ChatSession.user_id == user.id, ChatSession.user_id.is_(None)),
+        )
+        .order_by(nullsfirst(ChatMessage.parent_message_id))
+        .execution_options(populate_existing=True)
+    ).all()
+    if not rows:
+        raise OnyxError(OnyxErrorCode.SESSION_NOT_FOUND, "Chat session not found")
+
+    source_session: ChatSession = rows[0][0]
+    source_persona_id = source_session.persona_id
+    source_llm_override = source_session.llm_override
+    source_prompt_override = source_session.prompt_override
+    messages_to_copy = [
+        _SlackSeedMessage(
+            message=chat_message.message,
+            files=chat_message.files,
+            error=chat_message.error,
+            token_count=chat_message.token_count,
+            message_type=chat_message.message_type,
+            reasoning_tokens=chat_message.reasoning_tokens,
+        )
+        for _, chat_message in rows
+        if chat_message is not None and chat_message.message_type != MessageType.SYSTEM
+    ]
 
     # This enforces permissions and sets a default
     new_persona_id = get_best_persona_id_for_user(
         db_session=db_session,
         user=user,
-        persona_id=chat_session.persona_id,
+        persona_id=source_persona_id,
     )
 
-    return create_chat_session(
+    new_chat_session = create_chat_session(
         db_session=db_session,
         user_id=user.id,
         persona_id=new_persona_id,
         # Set this to empty string so the frontend will force a rename
         description="",
-        llm_override=chat_session.llm_override,
-        prompt_override=chat_session.prompt_override,
+        llm_override=source_llm_override,
+        prompt_override=source_prompt_override,
         # Chat is in UI now so this is false
         onyxbot_flow=False,
         # Maybe we want this in the future to track if it was created from Slack
         slack_thread_id=None,
     )
+
+    parent_message = get_or_create_root_message(
+        chat_session_id=new_chat_session.id,
+        db_session=db_session,
+    )
+    for seed_message in messages_to_copy:
+        parent_message = create_new_chat_message(
+            db_session=db_session,
+            chat_session_id=new_chat_session.id,
+            parent_message=parent_message,
+            message=seed_message.message,
+            files=seed_message.files,
+            error=seed_message.error,
+            token_count=seed_message.token_count,
+            message_type=seed_message.message_type,
+            reasoning_tokens=seed_message.reasoning_tokens,
+        )
+
+    return new_chat_session
 
 
 def update_chat_session(
@@ -463,38 +520,6 @@ def get_chat_messages_by_sessions(
         .order_by(nullsfirst(ChatMessage.parent_message_id))
     )
     return db_session.execute(stmt).scalars().all()
-
-
-def add_chats_to_session_from_slack_thread(
-    db_session: Session,
-    slack_chat_session_id: UUID,
-    new_chat_session_id: UUID,
-) -> None:
-    new_root_message = get_or_create_root_message(
-        chat_session_id=new_chat_session_id,
-        db_session=db_session,
-    )
-
-    for chat_message in get_chat_messages_by_sessions(
-        chat_session_ids=[slack_chat_session_id],
-        user_id=None,  # Ignore user permissions for this
-        db_session=db_session,
-        skip_permission_check=True,
-    ):
-        if chat_message.message_type == MessageType.SYSTEM:
-            continue
-        # Duplicate the message
-        new_root_message = create_new_chat_message(
-            db_session=db_session,
-            chat_session_id=new_chat_session_id,
-            parent_message=new_root_message,
-            message=chat_message.message,
-            files=chat_message.files,
-            error=chat_message.error,
-            token_count=chat_message.token_count,
-            message_type=chat_message.message_type,
-            reasoning_tokens=chat_message.reasoning_tokens,
-        )
 
 
 def add_search_docs_to_chat_message(
