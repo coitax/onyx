@@ -178,60 +178,6 @@ def load_in_memory_chat_files(
     )
 
 
-def get_user_files(
-    user_file_ids: list[UUID],
-    db_session: Session,
-) -> list[UserFile]:
-    """
-    Fetches UserFile database records based on provided file and project IDs.
-
-    Args:
-        user_file_ids: A list of specific UserFile IDs to fetch.
-        db_session: The SQLAlchemy database session.
-
-    Returns:
-        A list containing UserFile SQLAlchemy model objects corresponding to the
-        specified file IDs and all files within the specified project IDs.
-        It does NOT return the actual file content.
-    """
-    user_files: list[UserFile] = []
-
-    # 1. Fetch UserFile records for specific file IDs
-    for user_file_id in user_file_ids:
-        # Query the database for a UserFile with the matching ID
-        user_file = (
-            db_session.query(UserFile).filter(UserFile.id == user_file_id).first()
-        )
-        # If found, add it to the list
-        if user_file is not None:
-            user_files.append(user_file)
-
-    # 3. Return the combined list of UserFile database objects
-    return user_files
-
-
-def validate_user_files_ownership(
-    user_file_ids: list[UUID],
-    user_id: UUID | None,
-    db_session: Session,
-) -> list[UserFile]:
-    """
-    Fetches all UserFile database records for a given user.
-    """
-    user_files = get_user_files(user_file_ids, db_session)
-    current_user_files = []
-    for user_file in user_files:
-        # Note: if user_id is None, then all files should be None as well
-        # (since auth must be disabled in this case)
-        if user_file.user_id != user_id:
-            raise ValueError(
-                f"User {user_id} does not have access to file {user_file.id}"
-            )
-        current_user_files.append(user_file)
-
-    return current_user_files
-
-
 def save_file_from_url(url: str) -> str:
     response = requests.get(url)
     response.raise_for_status()
@@ -305,78 +251,119 @@ def verify_user_files(
     user_id: UUID | None,
     db_session: Session,
     project_id: int | None = None,
-) -> None:
+) -> list[FileDescriptor]:
     """
-    Verify that all provided file descriptors belong to the specified user.
-    For project files (those without user_file_id), verifies access through project ownership.
+    Authorize client-supplied file descriptors and rebuild them from the
+    UserFile rows they resolve to.
 
-    Args:
-        user_files: List of file descriptors to verify
-        user_id: The user ID to check ownership against
-        db_session: The SQLAlchemy database session
-        project_id: Optional project ID to verify project file access against
+    A descriptor with a ``user_file_id`` must reference an existing UserFile
+    owned by the user. A descriptor without one must reference a file in
+    ``project_id``, which the user must own. In both cases the descriptor's
+    ``id`` must equal that UserFile's ``file_id``.
+
+    Callers must use the returned descriptors instead of the input: their
+    ``id`` and ``user_file_id`` come from the authorized UserFile rows, and
+    ``id`` is what downstream code reads from the file store.
 
     Raises:
-        ValueError: If any file does not belong to the user or is not found
+        ValueError: If any descriptor is malformed, references a file that does
+            not exist, or references a file the user cannot access.
     """
     from onyx.db.models import Project__UserFile
     from onyx.db.projects import check_project_ownership
 
-    # Extract user_file_ids and project file_ids from the file descriptors
-    user_file_ids = []
-    project_file_ids = []
-
+    requested: list[tuple[FileDescriptor, UUID | None]] = []
     for file_descriptor in user_files:
-        # Check if this file descriptor has a user_file_id
-        if file_descriptor.get("user_file_id"):
-            try:
-                user_file_ids.append(UUID(file_descriptor["user_file_id"]))
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid user_file_id in file descriptor: {file_descriptor['user_file_id']}"
-                )
-                continue
-        else:
-            # This is a project file - use the 'id' field which is the file_id
-            if file_descriptor.get("id"):
-                project_file_ids.append(file_descriptor["id"])
+        if not file_descriptor.get("id"):
+            raise ValueError("File descriptor is missing an id")
+        raw_user_file_id = file_descriptor.get("user_file_id")
+        if not raw_user_file_id:
+            requested.append((file_descriptor, None))
+            continue
+        try:
+            requested.append((file_descriptor, UUID(str(raw_user_file_id))))
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"Invalid user_file_id in file descriptor: {raw_user_file_id}"
+            )
 
-    # Verify user files (existing logic)
+    user_file_ids = [uf_id for _, uf_id in requested if uf_id is not None]
+    project_file_ids = [fd["id"] for fd, uf_id in requested if uf_id is None]
+
+    user_files_by_id: dict[UUID, UserFile] = {}
     if user_file_ids:
-        validate_user_files_ownership(user_file_ids, user_id, db_session)
+        user_files_by_id = {
+            uf.id: uf
+            for uf in db_session.query(UserFile)
+            .filter(UserFile.id.in_(user_file_ids))
+            .all()
+        }
 
-    # Verify project files
+    project_files_by_file_id: dict[str, UserFile] = {}
     if project_file_ids:
         if project_id is None:
             raise ValueError(
                 "Project files provided but no project_id specified for verification"
             )
 
-        # Verify user owns the project
         if not check_project_ownership(project_id, user_id, db_session):
             raise ValueError(
                 f"User {user_id} does not have access to project {project_id}"
             )
 
-        # Verify all project files belong to the specified project
-        user_files_in_project = (
-            db_session.query(UserFile)
+        project_files_by_file_id = {
+            uf.file_id: uf
+            for uf in db_session.query(UserFile)
             .join(Project__UserFile)
             .filter(
                 Project__UserFile.project_id == project_id,
                 UserFile.file_id.in_(project_file_ids),
             )
             .all()
+        }
+
+    authorized: list[FileDescriptor] = []
+    for file_descriptor, user_file_id in requested:
+        user_file: UserFile | None
+        if user_file_id is not None:
+            user_file = user_files_by_id.get(user_file_id)
+            if user_file is None:
+                raise ValueError(f"User file {user_file_id} not found")
+            # Note: if user_id is None, then all files should be None as well
+            # (since auth must be disabled in this case)
+            if user_file.user_id != user_id:
+                raise ValueError(
+                    f"User {user_id} does not have access to file {user_file.id}"
+                )
+        else:
+            user_file = project_files_by_file_id.get(file_descriptor["id"])
+            if user_file is None:
+                raise ValueError(
+                    f"File {file_descriptor['id']} is not associated with project {project_id}"
+                )
+
+        if file_descriptor["id"] != user_file.file_id:
+            raise ValueError(
+                f"File descriptor id does not match user file {user_file.id}"
+            )
+
+        try:
+            file_type = ChatFileType(file_descriptor["type"])
+        except (KeyError, ValueError):
+            raise ValueError(
+                f"Invalid file type in file descriptor for user file {user_file.id}"
+            )
+
+        authorized.append(
+            FileDescriptor(
+                id=user_file.file_id,
+                type=file_type,
+                name=file_descriptor.get("name") or user_file.name,
+                user_file_id=str(user_file.id),
+            )
         )
 
-        # Check if all files were found in the project
-        found_file_ids = {uf.file_id for uf in user_files_in_project}
-        missing_files = set(project_file_ids) - found_file_ids
-
-        if missing_files:
-            raise ValueError(
-                f"Files {missing_files} are not associated with project {project_id}"
-            )
+    return authorized
 
 
 def build_frontend_file_url(file_id: str) -> str:

@@ -602,8 +602,9 @@ def build_chat_turn(
     if not is_multi:
         model_display_names = [""]
 
-    # Verify that the user-specified files actually belong to the user
-    verify_user_files(
+    # Verify that the user-specified files actually belong to the user. Only the
+    # returned descriptors may be stored or loaded; the request's are untrusted.
+    file_descriptors = verify_user_files(
         user_files=new_msg_req.file_descriptors,
         user_id=user_id,
         db_session=db_session,
@@ -679,7 +680,7 @@ def build_chat_turn(
             message=message_text,
             token_count=token_counter(message_text),
             message_type=MessageType.USER,
-            files=new_msg_req.file_descriptors,
+            files=file_descriptors,
             db_session=db_session,
             commit=True,
         )
@@ -747,7 +748,7 @@ def build_chat_turn(
         db_session=db_session,
         persona_system_prompt=max_reserved_system_prompt_tokens_str,
         token_counter=token_counter,
-        files=new_msg_req.file_descriptors,
+        files=file_descriptors,
         user_memory_context=prompt_memory_context,
     )
 
