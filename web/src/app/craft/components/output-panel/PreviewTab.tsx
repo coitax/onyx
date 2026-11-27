@@ -48,7 +48,9 @@ export default function PreviewTab({ webappUrl, refreshKey }: PreviewTabProps) {
               "transition-opacity duration-300",
               iframeLoaded ? "opacity-100" : "opacity-0"
             )}
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+            // Never add allow-same-origin: the webapp is served from the Onyx
+            // origin and would run with the viewer's session.
+            sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
             title="Web App Preview"
           />
         )}
