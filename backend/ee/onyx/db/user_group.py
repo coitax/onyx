@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import delete
+from sqlalchemy import exists
 from sqlalchemy import func
 from sqlalchemy import Select
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from ee.onyx.server.user_group.models import UserGroupCreate
 from ee.onyx.server.user_group.models import UserGroupUpdate
 from onyx.configs.app_configs import DISABLE_VECTOR_DB
 from onyx.db.connector_credential_pair import get_connector_credential_pair_from_id
+from onyx.db.connector_credential_pair import get_connector_credential_pairs_for_user
 from onyx.db.enums import AccessType
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.enums import GrantSource
@@ -42,6 +44,8 @@ from onyx.db.models import UserRole
 from onyx.db.permissions import recompute_permissions_for_group__no_commit
 from onyx.db.permissions import recompute_user_permissions__no_commit
 from onyx.db.users import fetch_user_by_id
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -691,15 +695,112 @@ def update_user_curator_relationship(
     db_session.commit()
 
 
+def _fetch_user_group_for_update(db_session: Session, user_group_id: int) -> UserGroup:
+    """Locks the group row so authorization and the update see the same group."""
+    db_user_group = db_session.scalar(
+        select(UserGroup).where(UserGroup.id == user_group_id).with_for_update()
+    )
+    if db_user_group is None:
+        raise ValueError(f"UserGroup with id '{user_group_id}' not found")
+    return db_user_group
+
+
+def _validate_user_group_update_requester(
+    db_session: Session,
+    user_group: UserGroup,
+    user_making_change: User,
+    added_cc_pair_ids: set[int],
+) -> None:
+    """Admins may update any group. Curators and global curators may only update
+    non-default groups they curate that grant no permission beyond basic access,
+    and may only attach connectors they can already edit or that are public.
+    """
+    if user_making_change.role == UserRole.ADMIN:
+        return
+
+    if user_making_change.role not in (UserRole.CURATOR, UserRole.GLOBAL_CURATOR):
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Only admins and curators can update user groups.",
+        )
+
+    if user_group.is_default:
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Only admins can modify default system groups.",
+        )
+
+    grants_elevated_permission = db_session.scalar(
+        select(
+            exists().where(
+                PermissionGrant.group_id == user_group.id,
+                PermissionGrant.is_deleted.is_(False),
+                PermissionGrant.permission != Permission.BASIC_ACCESS,
+            )
+        )
+    )
+    if grants_elevated_permission:
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Only admins can modify groups that grant permissions.",
+        )
+
+    # Global curators curate every group they are a member of
+    curator_stmt = select(User__UserGroup).where(
+        User__UserGroup.user_group_id == user_group.id,
+        User__UserGroup.user_id == user_making_change.id,
+    )
+    if user_making_change.role == UserRole.CURATOR:
+        curator_stmt = curator_stmt.where(
+            User__UserGroup.is_curator == True  # noqa: E712
+        )
+    if db_session.scalar(curator_stmt) is None:
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            f"User is not a curator of group '{user_group.id}'.",
+        )
+
+    if not added_cc_pair_ids:
+        return
+
+    allowed_cc_pair_ids = {
+        cc_pair.id
+        for cc_pair in get_connector_credential_pairs_for_user(
+            db_session=db_session,
+            user=user_making_change,
+            get_editable=True,
+            ids=list(added_cc_pair_ids),
+            processing_mode=None,
+        )
+    }
+    allowed_cc_pair_ids.update(
+        db_session.scalars(
+            select(ConnectorCredentialPair.id).where(
+                ConnectorCredentialPair.id.in_(added_cc_pair_ids),
+                ConnectorCredentialPair.access_type == AccessType.PUBLIC,
+            )
+        ).all()
+    )
+    if not added_cc_pair_ids.issubset(allowed_cc_pair_ids):
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Curators can only add connectors they are allowed to edit.",
+        )
+
+
 def add_users_to_user_group(
     db_session: Session,
     user: User,
     user_group_id: int,
     user_ids: list[UUID],
 ) -> UserGroup:
-    db_user_group = fetch_user_group(db_session=db_session, user_group_id=user_group_id)
-    if db_user_group is None:
-        raise ValueError(f"UserGroup with id '{user_group_id}' not found")
+    db_user_group = _fetch_user_group_for_update(db_session, user_group_id)
+    _validate_user_group_update_requester(
+        db_session=db_session,
+        user_group=db_user_group,
+        user_making_change=user,
+        added_cc_pair_ids=set(),
+    )
 
     missing_users = [
         user_id for user_id in user_ids if fetch_user_by_id(db_session, user_id) is None
@@ -725,17 +826,16 @@ def add_users_to_user_group(
         cc_pair_ids=[cc_pair.id for cc_pair in db_user_group.cc_pairs],
     )
 
-    return update_user_group(
+    return _apply_user_group_update__authorized(
         db_session=db_session,
-        user=user,
-        user_group_id=user_group_id,
+        db_user_group=db_user_group,
         user_group_update=user_group_update,
     )
 
 
 def update_user_group(
     db_session: Session,
-    user: User,  # noqa: ARG001
+    user: User,
     user_group_id: int,
     user_group_update: UserGroupUpdate,
 ) -> UserGroup:
@@ -743,10 +843,31 @@ def update_user_group(
     That will be processed by check_for_vespa_user_groups_sync_task and trigger
     a long running background sync to Vespa.
     """
-    stmt = select(UserGroup).where(UserGroup.id == user_group_id)
-    db_user_group = db_session.scalar(stmt)
-    if db_user_group is None:
-        raise ValueError(f"UserGroup with id '{user_group_id}' not found")
+    db_user_group = _fetch_user_group_for_update(db_session, user_group_id)
+    current_cc_pair_ids = {
+        rel.cc_pair_id for rel in db_user_group.cc_pair_relationships if rel.is_current
+    }
+    _validate_user_group_update_requester(
+        db_session=db_session,
+        user_group=db_user_group,
+        user_making_change=user,
+        added_cc_pair_ids=set(user_group_update.cc_pair_ids) - current_cc_pair_ids,
+    )
+
+    return _apply_user_group_update__authorized(
+        db_session=db_session,
+        db_user_group=db_user_group,
+        user_group_update=user_group_update,
+    )
+
+
+def _apply_user_group_update__authorized(
+    db_session: Session,
+    db_user_group: UserGroup,
+    user_group_update: UserGroupUpdate,
+) -> UserGroup:
+    """Caller must have locked and authorized `db_user_group`."""
+    user_group_id = db_user_group.id
 
     _check_user_group_is_modifiable(db_user_group)
 
@@ -765,13 +886,6 @@ def update_user_group(
             raise ValueError(
                 f"User(s) not found: {', '.join(str(user_id) for user_id in missing_users)}"
             )
-
-    # LEAVING THIS HERE FOR NOW FOR GIVING DIFFERENT ROLES
-    # ACCESS TO DIFFERENT PERMISSIONS
-    # if (removed_user_ids or added_user_ids) and (
-    #     not user or user.role != UserRole.ADMIN
-    # ):
-    #     raise ValueError("Only admins can add or remove users from user groups")
 
     if removed_user_ids:
         _cleanup_user__user_group_relationships__no_commit(
@@ -966,6 +1080,10 @@ def set_group_permission__no_commit(
 
     Does NOT commit — caller must commit the session.
     """
+    # Serializes with membership updates, which authorize against this group's grants
+    db_session.execute(
+        select(UserGroup.id).where(UserGroup.id == group_id).with_for_update()
+    )
     existing = db_session.execute(
         select(PermissionGrant)
         .where(
