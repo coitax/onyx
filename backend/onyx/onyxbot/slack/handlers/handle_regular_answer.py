@@ -19,6 +19,7 @@ from onyx.configs.onyxbot_configs import ONYX_BOT_NUM_RETRIES
 from onyx.configs.onyxbot_configs import ONYX_BOT_REACT_EMOJI
 from onyx.context.search.models import BaseFilters
 from onyx.context.search.models import Tag
+from onyx.db.chat import create_chat_session
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.models import SlackChannelConfig
 from onyx.db.models import User
@@ -34,7 +35,6 @@ from onyx.onyxbot.slack.utils import get_channel_name_from_id
 from onyx.onyxbot.slack.utils import respond_in_thread_or_channel
 from onyx.onyxbot.slack.utils import SlackRateLimiter
 from onyx.onyxbot.slack.utils import update_emote_react
-from onyx.server.query_and_chat.models import ChatSessionCreationRequest
 from onyx.server.query_and_chat.models import MessageOrigin
 from onyx.server.query_and_chat.models import SendMessageRequest
 from onyx.utils.logger import OnyxLoggingAdapter
@@ -247,8 +247,23 @@ def handle_regular_answer(
         onyx_user: User,
     ) -> ChatBasicResponse:
         with get_session_with_current_tenant() as db_session:
+            # Answers restricted to public docs run as the anonymous user, so the
+            # session is left unassigned for whoever continues it in the web UI.
+            chat_session = create_chat_session(
+                db_session=db_session,
+                description="",
+                user_id=None if onyx_user.is_anonymous else onyx_user.id,
+                persona_id=persona.id,
+                onyxbot_flow=True,
+                slack_thread_id=message_ts_to_respond_to,
+            )
             packets = handle_stream_message_objects(
-                new_msg_req=new_message_request,
+                new_msg_req=new_message_request.model_copy(
+                    update={
+                        "chat_session_id": chat_session.id,
+                        "chat_session_info": None,
+                    }
+                ),
                 user=onyx_user,
                 db_session=db_session,
                 bypass_acl=False,
@@ -280,9 +295,6 @@ def handle_regular_answer(
             internal_search_filters=filters,
             deep_research=False,
             origin=MessageOrigin.SLACKBOT,
-            chat_session_info=ChatSessionCreationRequest(
-                persona_id=persona.id,
-            ),
         )
 
         # if it's a DM or ephemeral message, answer based on private documents.
