@@ -1,11 +1,15 @@
 """Tests for chat_utils.py, specifically get_custom_agent_prompt."""
 
 from unittest.mock import MagicMock
+from uuid import UUID
+from uuid import uuid4
 
 from onyx.chat.chat_utils import _build_tool_call_response_history_message
 from onyx.chat.chat_utils import get_custom_agent_prompt
 from onyx.configs.constants import DEFAULT_PERSONA_ID
 from onyx.prompts.chat_prompts import TOOL_CALL_RESPONSE_CROSS_MESSAGE
+
+_OWNER_ID = uuid4()
 
 
 class TestGetCustomAgentPrompt:
@@ -30,16 +34,19 @@ class TestGetCustomAgentPrompt:
     ) -> MagicMock:
         """Create a mock ChatSession with the specified attributes."""
         chat_session = MagicMock()
+        chat_session.user_id = _OWNER_ID
         chat_session.project = project
         return chat_session
 
     def _create_mock_project(
         self,
         instructions: str = "",
+        user_id: UUID = _OWNER_ID,
     ) -> MagicMock:
         """Create a mock UserProject with the specified attributes."""
         project = MagicMock()
         project.instructions = instructions
+        project.user_id = user_id
         return project
 
     def test_default_persona_no_project(self) -> None:

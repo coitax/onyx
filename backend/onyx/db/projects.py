@@ -194,6 +194,22 @@ def check_project_ownership(
     )
 
 
+def get_owned_project_for_update(
+    project_id: int, user_id: UUID, db_session: Session
+) -> UserProject | None:
+    """Return the project only if it is owned by user_id.
+
+    The row is share-locked until the transaction ends so it cannot be deleted
+    between this lookup and any write that references it.
+    """
+    return (
+        db_session.query(UserProject)
+        .filter(UserProject.id == project_id, UserProject.user_id == user_id)
+        .with_for_update(read=True)
+        .one_or_none()
+    )
+
+
 def get_user_files_from_project(
     project_id: int, user_id: UUID | None, db_session: Session
 ) -> list[UserFile]:

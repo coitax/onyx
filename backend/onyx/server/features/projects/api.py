@@ -28,8 +28,11 @@ from onyx.db.models import User
 from onyx.db.models import UserFile
 from onyx.db.models import UserProject
 from onyx.db.persona import get_personas_by_ids
+from onyx.db.projects import get_owned_project_for_update
 from onyx.db.projects import get_project_token_count
 from onyx.db.projects import upload_files_to_user_files_with_indexing
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.server.features.projects.models import CategorizedFilesSnapshot
 from onyx.server.features.projects.models import ChatSessionRequest
 from onyx.server.features.projects.models import TokenCountResponse
@@ -567,7 +570,10 @@ def move_chat_session(
     )
     if chat_session is None:
         raise HTTPException(status_code=404, detail="Chat session not found")
-    chat_session.project_id = project_id
+    project = get_owned_project_for_update(project_id, user_id, db_session)
+    if project is None:
+        raise OnyxError(OnyxErrorCode.NOT_FOUND, "Project not found")
+    chat_session.project_id = project.id
     db_session.commit()
     return Response(status_code=204)
 
