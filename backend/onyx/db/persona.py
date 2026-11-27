@@ -19,10 +19,14 @@ from onyx.access.hierarchy_access import get_user_external_group_ids
 from onyx.auth.schemas import UserRole
 from onyx.configs.app_configs import CURATORS_CANNOT_VIEW_OR_EDIT_NON_OWNED_ASSISTANTS
 from onyx.configs.constants import DEFAULT_PERSONA_ID
+from onyx.configs.constants import DISCORD_SERVICE_API_KEY_NAME
 from onyx.configs.constants import NotificationType
 from onyx.db.constants import SLACK_BOT_PERSONA_PREFIX
 from onyx.db.document_access import get_accessible_documents_by_ids
+from onyx.db.models import ApiKey
 from onyx.db.models import ConnectorCredentialPair
+from onyx.db.models import DiscordChannelConfig
+from onyx.db.models import DiscordGuildConfig
 from onyx.db.models import Document
 from onyx.db.models import DocumentSet
 from onyx.db.models import FederatedConnector__DocumentSet
@@ -165,7 +169,11 @@ def get_best_persona_id_for_user(
     db_session: Session, user: User, persona_id: int | None = None
 ) -> int | None:
     if persona_id is not None:
-        stmt = select(Persona).where(Persona.id == persona_id).distinct()
+        stmt = (
+            select(Persona)
+            .where(Persona.id == persona_id, Persona.deleted.is_(False))
+            .distinct()
+        )
         stmt = _add_user_filters(
             stmt=stmt,
             user=user,
@@ -180,7 +188,12 @@ def get_best_persona_id_for_user(
     # If the persona is not found, or the slack bot is using doc sets instead of personas,
     # we need to find the best persona for the user
     # This is the persona with the highest display priority that the user has access to
-    stmt = select(Persona).order_by(Persona.display_priority.desc()).distinct()
+    stmt = (
+        select(Persona)
+        .where(Persona.deleted.is_(False))
+        .order_by(Persona.display_priority.desc())
+        .distinct()
+    )
     stmt = _add_user_filters(stmt=stmt, user=user, get_editable=True)
     persona = db_session.scalars(stmt).one_or_none()
     return persona.id if persona else None
@@ -1414,3 +1427,74 @@ def user_can_access_persona(
     stmt = select(Persona).where(Persona.id == persona_id, Persona.deleted.is_(False))
     stmt = _add_user_filters(stmt, user, get_editable=get_editable)
     return db_session.scalar(stmt) is not None
+
+
+def _is_discord_bot_persona_for_user(
+    db_session: Session, persona_id: int, user: User
+) -> bool:
+    """True if `user` is the Discord bot's service account and an admin has
+    bound `persona_id` to a Discord guild or channel."""
+    if user.is_anonymous:
+        return False
+
+    is_discord_service_user = db_session.scalar(
+        select(
+            exists().where(
+                ApiKey.user_id == user.id,
+                ApiKey.name == DISCORD_SERVICE_API_KEY_NAME,
+                ApiKey.owner_id.is_(None),
+            )
+        )
+    )
+    if not is_discord_service_user:
+        return False
+
+    return bool(
+        db_session.scalar(
+            select(
+                or_(
+                    exists().where(DiscordGuildConfig.default_persona_id == persona_id),
+                    exists().where(
+                        DiscordChannelConfig.persona_override_id == persona_id
+                    ),
+                )
+            )
+        )
+    )
+
+
+def fetch_persona_for_chat(
+    db_session: Session,
+    persona_id: int | None,
+    user: User,
+    bypass_user_access_check: bool = False,
+) -> Persona | None:
+    """Return the non-deleted persona `user` may chat with, or None.
+
+    The returned object is the one chat should run with; callers must not
+    re-load the persona by id afterwards.
+
+    `bypass_user_access_check` is only for server-side flows where an admin
+    bound the persona (e.g. a Slack channel config); it never skips the
+    deleted check.
+    """
+    if persona_id is None:
+        return None
+
+    stmt = (
+        select(Persona)
+        .where(Persona.id == persona_id, Persona.deleted.is_(False))
+        .options(
+            selectinload(Persona.tools),
+            selectinload(Persona.user_files),
+            selectinload(Persona.document_sets),
+            selectinload(Persona.attached_documents),
+            selectinload(Persona.hierarchy_nodes),
+        )
+    )
+    if not bypass_user_access_check and not _is_discord_bot_persona_for_user(
+        db_session, persona_id, user
+    ):
+        stmt = _add_user_filters(stmt, user, get_editable=False)
+
+    return db_session.scalars(stmt).unique().one_or_none()
