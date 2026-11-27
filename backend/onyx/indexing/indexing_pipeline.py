@@ -30,6 +30,7 @@ from onyx.connectors.models import IndexAttemptMetadata
 from onyx.connectors.models import IndexingDocument
 from onyx.connectors.models import Section
 from onyx.connectors.models import TextSection
+from onyx.db.document import delete_document_links_to_other_cc_pairs__no_commit
 from onyx.db.document import get_documents_by_ids
 from onyx.db.document import upsert_document_by_connector_credential_pair
 from onyx.db.document import upsert_documents
@@ -280,8 +281,12 @@ def get_doc_ids_to_update(
 
     NB: Still need to associate the document in the DB if multiple connectors are
     indexing the same doc."""
+    # Ingestion API callers choose doc_updated_at freely, so it must not stop
+    # a connector from replacing a document that was ingested under its id.
     id_update_time_map = {
-        doc.id: doc.doc_updated_at for doc in db_docs if doc.doc_updated_at
+        doc.id: doc.doc_updated_at
+        for doc in db_docs
+        if doc.doc_updated_at and not doc.from_ingestion_api
     }
 
     updatable_docs: list[Document] = []
@@ -373,6 +378,15 @@ def index_doc_batch_prepare(
         db_session=db_session,
         document_ids=document_ids,
     )
+    # A connector that emits the id of a document created through the ingestion
+    # API takes it over, so cc_pairs the ingestion caller linked it to no
+    # longer grant access to the connector's content.
+    connector_doc_ids = {doc.id for doc in documents if not doc.from_ingestion_api}
+    taken_over_ingestion_doc_ids = [
+        db_doc.id
+        for db_doc in db_docs
+        if db_doc.from_ingestion_api and db_doc.id in connector_doc_ids
+    ]
 
     updatable_docs = (
         get_doc_ids_to_update(documents=documents, db_docs=db_docs)
@@ -399,6 +413,13 @@ def index_doc_batch_prepare(
 
     logger.info(
         f"Upserted {len(updatable_docs)} changed docs out of {len(documents)} total docs into the DB"
+    )
+
+    delete_document_links_to_other_cc_pairs__no_commit(
+        db_session=db_session,
+        document_ids=taken_over_ingestion_doc_ids,
+        connector_id=index_attempt_metadata.connector_id,
+        credential_id=index_attempt_metadata.credential_id,
     )
 
     # for all docs, upsert the document to cc pair relationship

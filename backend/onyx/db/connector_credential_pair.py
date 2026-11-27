@@ -88,9 +88,7 @@ def _add_user_filters(
     if get_editable:
         user_groups = select(User__UG.user_group_id).where(User__UG.user_id == user.id)
         if user.role == UserRole.CURATOR:
-            user_groups = user_groups.where(
-                User__UserGroup.is_curator == True  # noqa: E712
-            )
+            user_groups = user_groups.where(User__UG.is_curator == True)  # noqa: E712
         where_clause &= (
             ~exists()
             .where(UG__CCpair.cc_pair_id == ConnectorCredentialPair.id)
@@ -294,6 +292,14 @@ def verify_user_has_access_to_cc_pair(
     stmt = stmt.where(ConnectorCredentialPair.id == cc_pair_id)
     result = db_session.execute(stmt)
     return result.scalars().first() is not None
+
+
+def select_editable_cc_pair_keys_for_user(user: User) -> Select[tuple[int, int]]:
+    """(connector_id, credential_id) of every cc_pair the user is allowed to edit."""
+    stmt = select(
+        ConnectorCredentialPair.connector_id, ConnectorCredentialPair.credential_id
+    )
+    return _add_user_filters(stmt, user, get_editable=True)
 
 
 def get_connector_credential_pair_from_id(

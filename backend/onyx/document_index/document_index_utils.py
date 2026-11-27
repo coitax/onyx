@@ -132,6 +132,20 @@ def get_document_chunk_ids(
     return doc_chunk_ids
 
 
+def _get_chunk_id_document_key(document_id: str) -> str:
+    # Web parsing URL duplicate catching
+    if document_id and document_id[-1] == "/":
+        return document_id[:-1]
+    return document_id
+
+
+def get_document_ids_sharing_chunk_ids(document_id: str) -> list[str]:
+    """Every document ID whose chunks get the same IDs as this one's in
+    get_uuid_from_chunk_info, so writing one overwrites the others' chunks."""
+    key = _get_chunk_id_document_key(document_id)
+    return [key, key + "/"]
+
+
 def get_uuid_from_chunk_info(
     *,
     document_id: str,
@@ -141,11 +155,7 @@ def get_uuid_from_chunk_info(
 ) -> UUID:
     """NOTE: be VERY carefuly about changing this function. If changed without a migration,
     this can cause deletion/update/insertion to function incorrectly."""
-    doc_str = document_id
-
-    # Web parsing URL duplicate catching
-    if doc_str and doc_str[-1] == "/":
-        doc_str = doc_str[:-1]
+    doc_str = _get_chunk_id_document_key(document_id)
 
     chunk_index = (
         "large_" + str(large_chunk_id) if large_chunk_id is not None else str(chunk_id)
