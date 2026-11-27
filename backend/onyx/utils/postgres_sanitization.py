@@ -6,6 +6,7 @@ from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import Document
 from onyx.connectors.models import HierarchyNode
 from onyx.utils.logger import setup_logger
+from onyx.utils.url import sanitize_document_link
 
 logger = setup_logger()
 
@@ -132,7 +133,7 @@ def sanitize_document_for_postgres(document: Document) -> Document:
 
     for section in cleaned_doc.sections:
         if section.link is not None:
-            section.link = sanitize_string(section.link)
+            section.link = sanitize_document_link(sanitize_string(section.link))
         if section.text is not None:
             section.text = sanitize_string(section.text)
         if section.image_file_id is not None:
