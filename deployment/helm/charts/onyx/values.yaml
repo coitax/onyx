@@ -1216,6 +1216,7 @@ auth:
       opensearch_admin_password: ""
   userauth:
     # -- Used for password reset / verification tokens and OAuth/OIDC state signing.
+    # Email verification and password reset stay disabled until a secret of at least 32 bytes is set.
     # Disabled by default to preserve upgrade compatibility for existing Helm customers.
     enabled: false
     # -- Overwrite the default secret name, ignored if existingSecret is defined

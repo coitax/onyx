@@ -63,6 +63,7 @@ from httpx_oauth.oauth2 import BaseOAuth2
 from httpx_oauth.oauth2 import GetAccessTokenError
 from httpx_oauth.oauth2 import OAuth2Token
 from pydantic import BaseModel
+from pydantic import SecretStr
 from sqlalchemy import nulls_last
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -84,6 +85,7 @@ from onyx.configs.app_configs import AUTH_BACKEND
 from onyx.configs.app_configs import AUTH_COOKIE_EXPIRE_TIME_SECONDS
 from onyx.configs.app_configs import AUTH_TYPE
 from onyx.configs.app_configs import EMAIL_CONFIGURED
+from onyx.configs.app_configs import is_strong_user_auth_secret
 from onyx.configs.app_configs import JWT_PUBLIC_KEY_URL
 from onyx.configs.app_configs import PASSWORD_MAX_LENGTH
 from onyx.configs.app_configs import PASSWORD_MIN_LENGTH
@@ -96,6 +98,7 @@ from onyx.configs.app_configs import REQUIRE_EMAIL_VERIFICATION
 from onyx.configs.app_configs import SESSION_EXPIRE_TIME_SECONDS
 from onyx.configs.app_configs import TRACK_EXTERNAL_IDP_EXPIRY
 from onyx.configs.app_configs import USER_AUTH_SECRET
+from onyx.configs.app_configs import USER_AUTH_SECRET_MIN_LENGTH
 from onyx.configs.app_configs import VALID_EMAIL_DOMAINS
 from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.configs.constants import ANONYMOUS_USER_COOKIE_NAME
@@ -348,11 +351,55 @@ def enforce_seat_limit(db_session: Session, seats_needed: int = 1) -> None:
         raise OnyxError(OnyxErrorCode.SEAT_LIMIT_EXCEEDED, result.error_message)
 
 
+def _is_strong_signing_secret(secret: SecretType) -> bool:
+    if isinstance(secret, SecretStr):
+        return is_strong_user_auth_secret(secret.get_secret_value())
+    return is_strong_user_auth_secret(secret)
+
+
+def _log_weak_signing_secret(purpose: str) -> None:
+    logger.error(
+        f"Refusing to issue {purpose} token: USER_AUTH_SECRET is unset or shorter "
+        f"than {USER_AUTH_SECRET_MIN_LENGTH} bytes."
+    )
+
+
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     reset_password_token_secret = USER_AUTH_SECRET
     verification_token_secret = USER_AUTH_SECRET
     verification_token_lifetime_seconds = AUTH_COOKIE_EXPIRE_TIME_SECONDS
     user_db: SQLAlchemyUserDatabase[User, uuid.UUID]
+
+    # Anyone can sign an HS256 token with an empty or short key, so the
+    # verification and reset flows are refused outright until a strong
+    # USER_AUTH_SECRET is configured.
+    async def request_verify(
+        self, user: User, request: Optional[Request] = None
+    ) -> None:
+        if not _is_strong_signing_secret(self.verification_token_secret):
+            _log_weak_signing_secret("email verification")
+            return
+        await super().request_verify(user, request)
+
+    async def verify(self, token: str, request: Optional[Request] = None) -> User:
+        if not _is_strong_signing_secret(self.verification_token_secret):
+            raise exceptions.InvalidVerifyToken()
+        return await super().verify(token, request)
+
+    async def forgot_password(
+        self, user: User, request: Optional[Request] = None
+    ) -> None:
+        if not _is_strong_signing_secret(self.reset_password_token_secret):
+            _log_weak_signing_secret("password reset")
+            return
+        await super().forgot_password(user, request)
+
+    async def reset_password(
+        self, token: str, password: str, request: Optional[Request] = None
+    ) -> User:
+        if not _is_strong_signing_secret(self.reset_password_token_secret):
+            raise exceptions.InvalidResetPasswordToken()
+        return await super().reset_password(token, password, request)
 
     async def get_by_email(self, user_email: str) -> User:
         tenant_id = fetch_ee_implementation_or_noop(
@@ -1313,8 +1360,11 @@ if AUTH_BACKEND == AuthBackend.JWT:
         raise ValueError(
             "JWT auth backend is only supported for single-tenant, self-hosted deployments. Use 'redis' or 'postgres' instead."
         )
-    if not USER_AUTH_SECRET:
-        raise ValueError("USER_AUTH_SECRET is required for JWT auth backend.")
+    if not is_strong_user_auth_secret(USER_AUTH_SECRET):
+        raise ValueError(
+            f"USER_AUTH_SECRET of at least {USER_AUTH_SECRET_MIN_LENGTH} bytes is "
+            "required for JWT auth backend."
+        )
 
 if AUTH_BACKEND == AuthBackend.REDIS:
     auth_backend = AuthenticationBackend(
