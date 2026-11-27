@@ -899,6 +899,25 @@ def delete_documents_by_connector_credential_pair__no_commit(
     db_session.execute(stmt)
 
 
+def delete_document_links_to_other_cc_pairs__no_commit(
+    db_session: Session,
+    document_ids: list[str],
+    connector_id: int,
+    credential_id: int,
+) -> None:
+    """Detaches the documents from every cc_pair except the given one."""
+    if not document_ids:
+        return
+    stmt = delete(DocumentByConnectorCredentialPair).where(
+        DocumentByConnectorCredentialPair.id.in_(document_ids),
+        ~and_(
+            DocumentByConnectorCredentialPair.connector_id == connector_id,
+            DocumentByConnectorCredentialPair.credential_id == credential_id,
+        ),
+    )
+    db_session.execute(stmt)
+
+
 def delete_all_documents_by_connector_credential_pair__no_commit(
     db_session: Session,
     connector_id: int,
