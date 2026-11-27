@@ -12,6 +12,8 @@ from jwt import InvalidTokenError
 from jwt import PyJWTError
 from jwt.algorithms import RSAAlgorithm
 
+from onyx.configs.app_configs import JWT_AUDIENCE
+from onyx.configs.app_configs import JWT_ISSUER
 from onyx.configs.app_configs import JWT_PUBLIC_KEY_URL
 from onyx.utils.logger import setup_logger
 
@@ -20,6 +22,7 @@ logger = setup_logger()
 
 
 _PUBLIC_KEY_FETCH_ATTEMPTS = 2
+_REQUIRED_JWT_CLAIMS = ["aud", "iss", "exp", "iat"]
 
 
 class PublicKeyFormat(Enum):
@@ -129,6 +132,14 @@ def _resolve_public_key_from_jwks(
 
 
 async def verify_jwt_token(token: str) -> dict[str, Any] | None:
+    audience = JWT_AUDIENCE
+    issuer = JWT_ISSUER
+    if not audience or not issuer:
+        logger.error(
+            "JWT_AUDIENCE and JWT_ISSUER must both be set to accept bearer JWTs"
+        )
+        return None
+
     for attempt in range(_PUBLIC_KEY_FETCH_ATTEMPTS):
         public_key = get_public_key(token)
         if public_key is None:
@@ -143,7 +154,9 @@ async def verify_jwt_token(token: str) -> dict[str, Any] | None:
                 token,
                 public_key,
                 algorithms=["RS256"],
-                options={"verify_aud": False},
+                audience=audience,
+                issuer=issuer,
+                options={"require": _REQUIRED_JWT_CLAIMS},
             )
         except InvalidTokenError as e:
             logger.error(f"Invalid JWT token: {str(e)}")

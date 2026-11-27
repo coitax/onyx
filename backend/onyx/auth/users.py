@@ -1467,8 +1467,18 @@ optional_fastapi_current_user = fastapi_users.current_user(active=True, optional
 _JWT_EMAIL_CLAIM_KEYS = ("email", "preferred_username", "upn")
 
 
+def _jwt_email_is_verified(payload: dict[str, Any]) -> bool:
+    email_verified = payload.get("email_verified")
+    if isinstance(email_verified, bool):
+        return email_verified
+    # Some providers (e.g. AWS Cognito) serialize this claim as a string.
+    return isinstance(email_verified, str) and email_verified.lower() == "true"
+
+
 def _extract_email_from_jwt(payload: dict[str, Any]) -> str | None:
     """Return the best-effort email/username from a decoded JWT payload."""
+    if not _jwt_email_is_verified(payload):
+        return None
     for key in _JWT_EMAIL_CLAIM_KEYS:
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -1515,7 +1525,7 @@ async def _get_or_create_user_from_jwt(
     email = _extract_email_from_jwt(payload)
     if email is None:
         logger.warning(
-            "JWT token decoded successfully but no email claim found; skipping auth"
+            "JWT token decoded successfully but no verified email claim found; skipping auth"
         )
         return None
 
