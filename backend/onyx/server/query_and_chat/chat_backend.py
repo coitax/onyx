@@ -50,19 +50,20 @@ from onyx.db.chat import set_as_latest_chat_message
 from onyx.db.chat import set_preferred_response
 from onyx.db.chat import translate_db_message_to_chat_message_detail
 from onyx.db.chat import update_chat_session
+from onyx.db.chat_file_access import authorize_chat_file_access
 from onyx.db.chat_search import search_chat_sessions
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.enums import Permission
 from onyx.db.feedback import create_chat_message_feedback
 from onyx.db.feedback import remove_chat_message_feedback
+from onyx.db.file_record import get_filerecord_by_file_id_optional
 from onyx.db.models import ChatSessionSharedStatus
 from onyx.db.models import Persona
 from onyx.db.models import User
 from onyx.db.persona import get_persona_by_id
 from onyx.db.usage import increment_usage
 from onyx.db.usage import UsageType
-from onyx.db.user_file import get_file_id_by_user_file_id
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
 from onyx.file_store.file_store import get_default_file_store
@@ -866,26 +867,18 @@ def seed_chat_from_slack(
 def fetch_chat_file(
     file_id: str,
     request: Request,
-    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> Response:
-
-    # For user files, we need to get the file id from the user file id
-    file_id_from_user_file = get_file_id_by_user_file_id(file_id, db_session)
-    if file_id_from_user_file:
-        file_id = file_id_from_user_file
-
-    file_store = get_default_file_store()
-    file_record = file_store.read_file_record(file_id)
-    if not file_record:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    media_type = file_record.file_type
-    file_io = file_store.read_file(file_id, mode="b")
+    authorized_file = authorize_chat_file_access(
+        requested_id=file_id, user=user, db_session=db_session
+    )
+    if authorized_file is None:
+        raise OnyxError(OnyxErrorCode.NOT_FOUND, "File not found")
 
     # Files served here are immutable (content-addressed by file_id), so allow long-lived caching.
     # Use `private` because this is behind auth / tenant scoping.
-    etag = f'"{file_id}"'
+    etag = f'"{authorized_file.file_id}"'
     cache_headers = {
         "Cache-Control": "private, max-age=31536000, immutable",
         "ETag": etag,
@@ -895,7 +888,21 @@ def fetch_chat_file(
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cache_headers)
 
-    return StreamingResponse(file_io, media_type=media_type, headers=cache_headers)
+    file_store = get_default_file_store()
+    file_io = file_store.read_file(authorized_file.file_id, mode="b")
+
+    # read_file looks the record up again; refuse if it is no longer the one
+    # that was authorized.
+    with get_session_with_current_tenant() as check_session:
+        current_record = get_filerecord_by_file_id_optional(
+            authorized_file.file_id, check_session
+        )
+        if current_record is None or not authorized_file.matches(current_record):
+            raise OnyxError(OnyxErrorCode.NOT_FOUND, "File not found")
+
+    return StreamingResponse(
+        file_io, media_type=authorized_file.file_type, headers=cache_headers
+    )
 
 
 @router.get("/search", tags=PUBLIC_API_TAGS)

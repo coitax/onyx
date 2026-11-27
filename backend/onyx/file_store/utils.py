@@ -232,7 +232,7 @@ def validate_user_files_ownership(
     return current_user_files
 
 
-def save_file_from_url(url: str) -> str:
+def save_file_from_url(url: str, file_metadata: dict[str, str] | None = None) -> str:
     response = requests.get(url)
     response.raise_for_status()
 
@@ -243,17 +243,21 @@ def save_file_from_url(url: str) -> str:
         display_name="GeneratedImage",
         file_origin=FileOrigin.CHAT_IMAGE_GEN,
         file_type="image/png;base64",
+        file_metadata=file_metadata,
     )
     return file_id
 
 
-def save_file_from_base64(base64_string: str) -> str:
+def save_file_from_base64(
+    base64_string: str, file_metadata: dict[str, str] | None = None
+) -> str:
     file_store = get_default_file_store()
     file_id = file_store.save_file(
         content=BytesIO(base64.b64decode(base64_string)),
         display_name="GeneratedImage",
         file_origin=FileOrigin.CHAT_IMAGE_GEN,
         file_type=get_image_type(base64_string),
+        file_metadata=file_metadata,
     )
     return file_id
 
@@ -261,12 +265,14 @@ def save_file_from_base64(base64_string: str) -> str:
 def save_file(
     url: str | None = None,
     base64_data: str | None = None,
+    file_metadata: dict[str, str] | None = None,
 ) -> str:
     """Save a file from either a URL or base64 encoded string.
 
     Args:
         url: URL to download file from
         base64_data: Base64 encoded file data
+        file_metadata: Metadata stored on the file record
 
     Returns:
         The unique ID of the saved file
@@ -278,22 +284,26 @@ def save_file(
         raise ValueError("Cannot specify both url and base64_data")
 
     if url is not None:
-        return save_file_from_url(url)
+        return save_file_from_url(url, file_metadata)
     elif base64_data is not None:
-        return save_file_from_base64(base64_data)
+        return save_file_from_base64(base64_data, file_metadata)
     else:
         raise ValueError("Must specify either url or base64_data")
 
 
-def save_files(urls: list[str], base64_files: list[str]) -> list[str]:
+def save_files(
+    urls: list[str],
+    base64_files: list[str],
+    file_metadata: dict[str, str] | None = None,
+) -> list[str]:
     # NOTE: be explicit about typing so that if we change things, we get notified
     funcs: list[
         tuple[
-            Callable[[str | None, str | None], str],
-            tuple[str | None, str | None],
+            Callable[[str | None, str | None, dict[str, str] | None], str],
+            tuple[str | None, str | None, dict[str, str] | None],
         ]
-    ] = [(save_file, (url, None)) for url in urls] + [
-        (save_file, (None, base64_file)) for base64_file in base64_files
+    ] = [(save_file, (url, None, file_metadata)) for url in urls] + [
+        (save_file, (None, base64_file, file_metadata)) for base64_file in base64_files
     ]
 
     return run_functions_tuples_in_parallel(funcs)
@@ -323,27 +333,48 @@ def verify_user_files(
     from onyx.db.projects import check_project_ownership
 
     # Extract user_file_ids and project file_ids from the file descriptors
-    user_file_ids = []
+    descriptor_file_id_by_user_file_id: dict[UUID, str | None] = {}
     project_file_ids = []
 
     for file_descriptor in user_files:
         # Check if this file descriptor has a user_file_id
         if file_descriptor.get("user_file_id"):
             try:
-                user_file_ids.append(UUID(file_descriptor["user_file_id"]))
+                user_file_id = UUID(str(file_descriptor["user_file_id"]))
             except (ValueError, TypeError):
-                logger.warning(
+                raise ValueError(
                     f"Invalid user_file_id in file descriptor: {file_descriptor['user_file_id']}"
                 )
-                continue
+            descriptor_file_id = file_descriptor.get("id")
+            previous_file_id = descriptor_file_id_by_user_file_id.setdefault(
+                user_file_id, descriptor_file_id
+            )
+            if previous_file_id != descriptor_file_id:
+                raise ValueError(
+                    f"File descriptor does not match user file {user_file_id}"
+                )
         else:
             # This is a project file - use the 'id' field which is the file_id
             if file_descriptor.get("id"):
                 project_file_ids.append(file_descriptor["id"])
 
-    # Verify user files (existing logic)
-    if user_file_ids:
-        validate_user_files_ownership(user_file_ids, user_id, db_session)
+    # The descriptor id is the file that gets read later, so it must be the
+    # file of the user file whose ownership was checked.
+    if descriptor_file_id_by_user_file_id:
+        owned_user_files = validate_user_files_ownership(
+            list(descriptor_file_id_by_user_file_id), user_id, db_session
+        )
+        owned_file_id_by_user_file_id = {
+            user_file.id: user_file.file_id for user_file in owned_user_files
+        }
+        for (
+            user_file_id,
+            descriptor_file_id,
+        ) in descriptor_file_id_by_user_file_id.items():
+            if owned_file_id_by_user_file_id.get(user_file_id) != descriptor_file_id:
+                raise ValueError(
+                    f"File descriptor does not match user file {user_file_id}"
+                )
 
     # Verify project files
     if project_file_ids:

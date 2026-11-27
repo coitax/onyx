@@ -108,13 +108,6 @@ def update_last_accessed_at_for_user_files(
     db_session.commit()
 
 
-def get_file_id_by_user_file_id(user_file_id: str, db_session: Session) -> str | None:
-    user_file = db_session.query(UserFile).filter(UserFile.id == user_file_id).first()
-    if user_file:
-        return user_file.file_id
-    return None
-
-
 def get_file_ids_by_user_file_ids(
     user_file_ids: list[UUID], db_session: Session
 ) -> list[str]:

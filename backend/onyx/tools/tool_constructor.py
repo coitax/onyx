@@ -140,6 +140,7 @@ def construct_tools(
     )
 
     mcp_tool_cache: dict[int, dict[int, MCPTool]] = {}
+    chat_session_id = custom_tool_config.chat_session_id if custom_tool_config else None
     # Get user's OAuth token if available
     user_oauth_token = None
     if user.oauth_accounts:
@@ -230,6 +231,8 @@ def construct_tools(
                         model=img_generation_llm_config.model_name,
                         tool_id=db_tool_model.id,
                         emitter=emitter,
+                        user_id=user.id,
+                        chat_session_id=chat_session_id,
                     )
                 ]
 
@@ -265,7 +268,12 @@ def construct_tools(
             # Handle Python/Code Interpreter Tool
             elif tool_cls.__name__ == PythonTool.__name__:
                 tool_dict[db_tool_model.id] = [
-                    PythonTool(tool_id=db_tool_model.id, emitter=emitter)
+                    PythonTool(
+                        tool_id=db_tool_model.id,
+                        emitter=emitter,
+                        user_id=user.id,
+                        chat_session_id=chat_session_id,
+                    )
                 ]
 
             # Handle File Reader Tool
@@ -352,6 +360,7 @@ def construct_tools(
                         )
                     ),
                     user_oauth_token=oauth_token_for_tool,
+                    user_id=user.id,
                 ),
             )
 
