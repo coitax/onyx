@@ -5,6 +5,7 @@ import {
   SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED,
   SERVER_SIDE_ONLY__AUTH_TYPE,
 } from "./lib/constants";
+import { buildContentSecurityPolicy } from "./lib/contentSecurityPolicy";
 
 // Authentication cookie names (matches backend constants)
 const FASTAPI_USERS_AUTH_COOKIE_NAME = "fastapiusersauth";
@@ -20,24 +21,9 @@ const PUBLIC_ROUTES = ["/auth", "/anonymous", "/_next", "/api"];
 // be run before the config is defined e.g. if we try and do a .map it will complain
 export const config = {
   matcher: [
-    // Auth-protected routes (for middleware auth check)
-    "/app/:path*",
-    "/admin/:path*",
-    "/agents/:path*",
-    "/connector/:path*",
-
-    // Enterprise Edition routes (for /ee rewriting)
-    // These are ONLY the EE-specific routes that should be rewritten
-    "/admin/groups/:path*",
-    "/admin/performance/usage/:path*",
-    "/admin/performance/query-history/:path*",
-    "/admin/theme/:path*",
-    "/admin/performance/custom-analytics/:path*",
-    "/admin/standard-answer/:path*",
-    "/agents/stats/:path*",
-
-    // Cloud only
-    "/admin/billing/:path*",
+    // Every rendered page, so each response gets a per-request CSP nonce.
+    // Auth checks and /ee rewriting below are limited to their own routes.
+    "/((?!api|_next/static|_next/image|ph_ingest|favicon.ico).*)",
   ],
 };
 
@@ -52,13 +38,17 @@ const EE_ROUTES = [
   "/agents/stats",
 ];
 
+function isUnderRoute(pathname: string, route: string): boolean {
+  return pathname === route || pathname.startsWith(`${route}/`);
+}
+
 export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   // Auth Check: Fast-fail at edge if no cookie (defense in depth)
   // Note: Layouts still do full verification (token validity, roles, etc.)
   const isProtectedRoute = PROTECTED_ROUTES.some((route) =>
-    pathname.startsWith(route)
+    isUnderRoute(pathname, route)
   );
   const isPublicRoute = PUBLIC_ROUTES.some((route) =>
     pathname.startsWith(route)
@@ -78,13 +68,28 @@ export async function proxy(request: NextRequest) {
     }
   }
 
+  // Next.js reads the nonce from the request's CSP header and adds it to the
+  // scripts it renders; the root layout reads x-nonce for its own scripts.
+  const nonce = btoa(crypto.randomUUID());
+  const contentSecurityPolicy = buildContentSecurityPolicy(nonce);
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("Content-Security-Policy", contentSecurityPolicy);
+
+  let response: NextResponse;
   // Enterprise Edition: Rewrite EE-specific routes to /ee prefix
-  if (SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED) {
-    if (EE_ROUTES.some((route) => pathname.startsWith(route))) {
-      const newUrl = new URL(`/ee${pathname}`, request.url);
-      return NextResponse.rewrite(newUrl);
-    }
+  if (
+    SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED &&
+    EE_ROUTES.some((route) => pathname.startsWith(route))
+  ) {
+    const newUrl = new URL(`/ee${pathname}`, request.url);
+    response = NextResponse.rewrite(newUrl, {
+      request: { headers: requestHeaders },
+    });
+  } else {
+    response = NextResponse.next({ request: { headers: requestHeaders } });
   }
 
-  return NextResponse.next();
+  response.headers.set("Content-Security-Policy", contentSecurityPolicy);
+  return response;
 }

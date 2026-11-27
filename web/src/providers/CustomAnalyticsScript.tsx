@@ -3,7 +3,13 @@
 import { useEffect, useRef } from "react";
 import { useSettingsContext } from "@/providers/SettingsProvider";
 
-export default function CustomAnalyticsScript() {
+interface CustomAnalyticsScriptProps {
+  nonce?: string;
+}
+
+export default function CustomAnalyticsScript({
+  nonce,
+}: CustomAnalyticsScriptProps) {
   const { customAnalyticsScript } = useSettingsContext();
   const injectedRef = useRef(false);
 
@@ -13,9 +19,12 @@ export default function CustomAnalyticsScript() {
 
     const script = document.createElement("script");
     script.type = "text/javascript";
+    if (nonce) {
+      script.nonce = nonce;
+    }
     script.textContent = customAnalyticsScript;
     document.head.appendChild(script);
-  }, [customAnalyticsScript]);
+  }, [customAnalyticsScript, nonce]);
 
   return null;
 }

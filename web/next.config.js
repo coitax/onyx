@@ -1,19 +1,8 @@
 // Always require withSentryConfig
 const { withSentryConfig } = require("@sentry/nextjs");
-
-const cspHeader = `
-    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-    font-src 'self' https://fonts.gstatic.com;
-    object-src 'none';
-    base-uri 'self';
-    form-action 'self';
-    ${
-      process.env.NEXT_PUBLIC_CLOUD_ENABLED === "true" &&
-      process.env.NODE_ENV !== "development"
-        ? "upgrade-insecure-requests;"
-        : ""
-    }
-`;
+const {
+  buildContentSecurityPolicy,
+} = require("./src/lib/contentSecurityPolicy");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -41,8 +30,10 @@ const nextConfig = {
         source: "/(.*)",
         headers: [
           {
+            // Rendered pages get a nonce-based policy from src/proxy.ts,
+            // which overrides this one.
             key: "Content-Security-Policy",
-            value: cspHeader.replace(/\n/g, ""),
+            value: buildContentSecurityPolicy(),
           },
           {
             key: "Strict-Transport-Security",
