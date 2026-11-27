@@ -11,8 +11,8 @@ from ee.onyx.configs.app_configs import SUPER_CLOUD_API_KEY
 from ee.onyx.configs.app_configs import SUPER_USERS
 from ee.onyx.server.seeding import get_seed_config
 from onyx.auth.permissions import require_permission
+from onyx.auth.user_auth_secret import get_user_auth_secret
 from onyx.configs.app_configs import AUTH_TYPE
-from onyx.configs.app_configs import USER_AUTH_SECRET
 from onyx.db.enums import Permission
 from onyx.db.models import User
 from onyx.utils.logger import setup_logger
@@ -61,8 +61,8 @@ def generate_anonymous_user_jwt_token(tenant_id: str) -> str:
         "iat": datetime.utcnow(),  # Issued at time
     }
 
-    return jwt.encode(payload, USER_AUTH_SECRET, algorithm="HS256")
+    return jwt.encode(payload, get_user_auth_secret(), algorithm="HS256")
 
 
 def decode_anonymous_user_jwt_token(token: str) -> dict:
-    return jwt.decode(token, USER_AUTH_SECRET, algorithms=["HS256"])
+    return jwt.decode(token, get_user_auth_secret(), algorithms=["HS256"])

@@ -1217,6 +1217,7 @@ auth:
   userauth:
     # -- Used for password reset / verification tokens and OAuth/OIDC state signing.
     # Disabled by default to preserve upgrade compatibility for existing Helm customers.
+    # When disabled, the API server generates a random secret and stores it in Postgres.
     enabled: false
     # -- Overwrite the default secret name, ignored if existingSecret is defined
     secretName: 'onyx-userauth'
@@ -1234,7 +1235,8 @@ configMap:
   # Auth type: "basic" (default), "google_oauth", "oidc", or "saml"
   # UPGRADE NOTE: Default changed from "disabled" to "basic" in 0.4.34.
   # Set auth.userauth.enabled=true and provide auth.userauth.values.user_auth_secret
-  # before enabling flows that require it.
+  # to manage the token signing secret yourself; otherwise one is generated and
+  # stored in Postgres.
   AUTH_TYPE: "basic"
   # Enable PKCE for OIDC login flow. Leave empty/false for backward compatibility.
   OIDC_PKCE_ENABLED: ""

@@ -222,10 +222,11 @@ JWT_PUBLIC_KEY_URL: str | None = os.getenv("JWT_PUBLIC_KEY_URL", None)
 
 USER_AUTH_SECRET = os.environ.get("USER_AUTH_SECRET", "")
 
-if AUTH_TYPE == AuthType.BASIC and not USER_AUTH_SECRET:
+if AUTH_TYPE == AuthType.BASIC and not USER_AUTH_SECRET.strip():
     logger.warning(
-        "USER_AUTH_SECRET is not set. This is required for secure password reset "
-        "and email verification tokens. Please set USER_AUTH_SECRET in production."
+        "USER_AUTH_SECRET is not set. A random secret will be generated and stored "
+        "in Postgres to sign password reset and email verification tokens. "
+        "Set USER_AUTH_SECRET to manage this secret explicitly."
     )
 
 # Duration (in seconds) for which the FastAPI Users JWT token remains valid in the user's browser.

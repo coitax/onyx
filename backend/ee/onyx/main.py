@@ -40,13 +40,13 @@ from ee.onyx.server.token_rate_limits.api import (
 )
 from ee.onyx.server.user_group.api import router as user_group_router
 from ee.onyx.utils.encryption import test_encryption
+from onyx.auth.user_auth_secret import get_user_auth_secret
 from onyx.auth.users import auth_backend
 from onyx.auth.users import create_onyx_oauth_router
 from onyx.auth.users import fastapi_users
 from onyx.configs.app_configs import AUTH_TYPE
 from onyx.configs.app_configs import OAUTH_CLIENT_ID
 from onyx.configs.app_configs import OAUTH_CLIENT_SECRET
-from onyx.configs.app_configs import USER_AUTH_SECRET
 from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.configs.constants import AuthType
 from onyx.main import get_application as get_application_base
@@ -110,7 +110,7 @@ def get_application() -> FastAPI:
             create_onyx_oauth_router(
                 oauth_client,
                 auth_backend,
-                USER_AUTH_SECRET,
+                get_user_auth_secret,
                 associate_by_email=True,
                 is_verified_by_default=True,
                 # Points the user back to the login page
