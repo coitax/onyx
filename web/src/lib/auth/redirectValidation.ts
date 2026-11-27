@@ -52,5 +52,14 @@ export function validateInternalRedirect(
     return null;
   }
 
+  // Browsers strip tab/newline when parsing URLs, so "/\t/evil.com" would
+  // otherwise become the protocol-relative "//evil.com"
+  for (let i = 0; i < trimmedUrl.length; i++) {
+    const code = trimmedUrl.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) {
+      return null;
+    }
+  }
+
   return trimmedUrl;
 }

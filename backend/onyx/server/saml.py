@@ -30,6 +30,7 @@ from onyx.db.auth import get_user_db
 from onyx.db.engine.async_sql_engine import get_async_session_context_manager
 from onyx.db.models import User
 from onyx.utils.logger import setup_logger
+from onyx.utils.url import sanitize_internal_redirect
 
 
 logger = setup_logger()
@@ -168,26 +169,7 @@ class SAMLAuthorizeResponse(BaseModel):
 
 def _sanitize_relay_state(candidate: str | None) -> str | None:
     """Ensure the relay state is an internal path to avoid open redirects."""
-    if not candidate:
-        return None
-
-    relay_state = candidate.strip()
-    if not relay_state or not relay_state.startswith("/"):
-        return None
-
-    if "\\" in relay_state:
-        return None
-
-    # Reject colon before query/fragment to match frontend validation
-    path_portion = relay_state.split("?", 1)[0].split("#", 1)[0]
-    if ":" in path_portion:
-        return None
-
-    parsed = urlparse(relay_state)
-    if parsed.scheme or parsed.netloc:
-        return None
-
-    return relay_state
+    return sanitize_internal_redirect(candidate)
 
 
 @router.get("/authorize")

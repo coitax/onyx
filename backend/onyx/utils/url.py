@@ -350,6 +350,35 @@ def normalize_url(url: str) -> str:
     return normalized
 
 
+def sanitize_internal_redirect(candidate: str | None) -> str | None:
+    """Return `candidate` if it is a same-origin relative path, otherwise None.
+
+    Browsers drop ASCII tab/newline characters and treat `\\` like `/` when
+    resolving a redirect target, so `/\\t/evil.com` or `/\\evil.com` would
+    become a protocol-relative URL; both are rejected here.
+    """
+    if not candidate:
+        return None
+
+    path = candidate.strip()
+    if not path.startswith("/") or path.startswith("//"):
+        return None
+
+    if "\\" in path or any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return None
+
+    # A colon before the query/fragment could be read as a scheme
+    path_portion = path.split("?", 1)[0].split("#", 1)[0]
+    if ":" in path_portion:
+        return None
+
+    parsed = urlparse(path)
+    if parsed.scheme or parsed.netloc:
+        return None
+
+    return path
+
+
 def add_url_params(url: str, params: dict) -> str:
     """
     Add parameters to a URL, handling existing parameters properly.
