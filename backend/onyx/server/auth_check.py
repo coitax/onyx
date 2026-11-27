@@ -62,6 +62,9 @@ PUBLIC_ENDPOINT_SPECS = [
     # craft webapp proxy — access enforced per-session via sharing_scope in handler
     ("/build/sessions/{session_id}/webapp", {"GET"}),
     ("/build/sessions/{session_id}/webapp/{path:path}", {"GET"}),
+    # sandboxed webapp sub-resources — access enforced per-request via the grant
+    ("/build/sessions/{session_id}/webapp-assets/{grant}", {"GET"}),
+    ("/build/sessions/{session_id}/webapp-assets/{grant}/{path:path}", {"GET"}),
 ]
 
 
