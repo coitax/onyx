@@ -11,11 +11,35 @@ from onyx.auth import users as users_module
 
 def test_extract_email_requires_valid_format() -> None:
     """Helper should validate email format before returning value."""
-    assert users_module._extract_email_from_jwt({"email": "invalid@"}) is None
+    assert (
+        users_module._extract_email_from_jwt(
+            {"email": "invalid@", "email_verified": True}
+        )
+        is None
+    )
     result = users_module._extract_email_from_jwt(
-        {"preferred_username": "ValidUser@Example.COM"}
+        {"preferred_username": "ValidUser@Example.COM", "email_verified": True}
     )
     assert result == "validuser@example.com"
+
+
+def test_extract_email_requires_verified_flag() -> None:
+    email = "user@example.com"
+    assert users_module._extract_email_from_jwt({"email": email}) is None
+    assert (
+        users_module._extract_email_from_jwt({"email": email, "email_verified": False})
+        is None
+    )
+    assert (
+        users_module._extract_email_from_jwt(
+            {"email": email, "email_verified": "false"}
+        )
+        is None
+    )
+    assert (
+        users_module._extract_email_from_jwt({"email": email, "email_verified": "true"})
+        == email
+    )
 
 
 @pytest.mark.asyncio
@@ -38,7 +62,11 @@ async def test_get_or_create_user_updates_expiry(
     monkeypatch.setattr(users_module, "verify_email_domain", mark_domain)
     email = "jwt-user@example.com"
     exp_value = 1_700_000_000
-    payload: dict[str, Any] = {"email": email, "exp": exp_value}
+    payload: dict[str, Any] = {
+        "email": email,
+        "email_verified": True,
+        "exp": exp_value,
+    }
 
     existing_user = MagicMock()
     existing_user.email = email
@@ -89,7 +117,7 @@ async def test_get_or_create_user_skips_inactive(
     monkeypatch.setattr(users_module, "verify_email_domain", lambda *_a, **_kw: None)
 
     email = "inactive@example.com"
-    payload: dict[str, Any] = {"email": email}
+    payload: dict[str, Any] = {"email": email, "email_verified": True}
 
     existing_user = MagicMock()
     existing_user.email = email
@@ -129,7 +157,7 @@ async def test_get_or_create_user_handles_race_conditions(
     monkeypatch.setattr(users_module, "verify_email_domain", lambda *_a, **_kw: None)
 
     email = "race@example.com"
-    payload: dict[str, Any] = {"email": email}
+    payload: dict[str, Any] = {"email": email, "email_verified": True}
 
     inactive_user = MagicMock()
     inactive_user.email = email
@@ -173,7 +201,7 @@ async def test_get_or_create_user_provisions_new_user(
 ) -> None:
     """A brand new JWT user should be provisioned automatically."""
     email = "new-user@example.com"
-    payload = {"email": email}
+    payload = {"email": email, "email_verified": True}
     created_user = MagicMock()
     created_user.email = email
     created_user.oidc_expiry = None

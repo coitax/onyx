@@ -219,6 +219,18 @@ SAML_CONF_DIR = os.environ.get("SAML_CONF_DIR") or "/app/onyx/configs/saml_confi
 
 # JWT Public Key URL for JWT token verification
 JWT_PUBLIC_KEY_URL: str | None = os.getenv("JWT_PUBLIC_KEY_URL", None)
+# Bearer JWTs are only accepted when both of these are set and the token's
+# `aud` / `iss` claims match them exactly. Key sets such as Microsoft Entra or
+# Google are shared across many applications, so the signature alone does not
+# prove the token was issued for Onyx.
+JWT_AUDIENCE: str | None = os.getenv("JWT_AUDIENCE", "").strip() or None
+JWT_ISSUER: str | None = os.getenv("JWT_ISSUER", "").strip() or None
+
+if JWT_PUBLIC_KEY_URL and not (JWT_AUDIENCE and JWT_ISSUER):
+    logger.error(
+        "JWT_PUBLIC_KEY_URL is set but JWT_AUDIENCE and/or JWT_ISSUER is not. "
+        "Bearer JWT authentication is disabled until both are configured."
+    )
 
 USER_AUTH_SECRET = os.environ.get("USER_AUTH_SECRET", "")
 
