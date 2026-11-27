@@ -14,6 +14,24 @@ from onyx.utils.logger import setup_logger
 logger = setup_logger()
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """The sandbox app is user-controlled, so its redirects are never followed."""
+
+    def redirect_request(  # type: ignore[override]
+        self,
+        req: urllib.request.Request,  # noqa: ARG002
+        fp: object,  # noqa: ARG002
+        code: int,  # noqa: ARG002
+        msg: str,  # noqa: ARG002
+        headers: object,  # noqa: ARG002
+        newurl: str,  # noqa: ARG002
+    ) -> None:
+        return None
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler)
+
+
 class ProcessManager:
     """Manages Next.js server subprocess lifecycle.
 
@@ -141,13 +159,19 @@ class ProcessManager:
                 return False
 
             try:
-                with urllib.request.urlopen(url, timeout=2) as response:
+                with _no_redirect_opener.open(url, timeout=2) as response:
                     if response.status == 200:
                         logger.debug(
                             f"Server ready after {elapsed:.1f}s and {attempt_count} attempts"
                         )
                         return True
             except urllib.error.HTTPError as e:
+                # A redirect means the server is up; it is not followed.
+                if 300 <= e.code < 400:
+                    logger.debug(
+                        f"Server ready (HTTP {e.code}) after {elapsed:.1f}s and {attempt_count} attempts"
+                    )
+                    return True
                 # Log HTTP errors (server responding but with error)
                 if time.time() - last_log_time >= 10:
                     logger.debug(
