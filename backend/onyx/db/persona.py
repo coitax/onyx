@@ -19,9 +19,11 @@ from onyx.access.hierarchy_access import get_user_external_group_ids
 from onyx.auth.schemas import UserRole
 from onyx.configs.app_configs import CURATORS_CANNOT_VIEW_OR_EDIT_NON_OWNED_ASSISTANTS
 from onyx.configs.constants import DEFAULT_PERSONA_ID
+from onyx.configs.constants import FileOrigin
 from onyx.configs.constants import NotificationType
 from onyx.db.constants import SLACK_BOT_PERSONA_PREFIX
 from onyx.db.document_access import get_accessible_documents_by_ids
+from onyx.db.file_record import get_filerecord_by_file_id_optional
 from onyx.db.models import ConnectorCredentialPair
 from onyx.db.models import Document
 from onyx.db.models import DocumentSet
@@ -38,6 +40,7 @@ from onyx.db.models import User__UserGroup
 from onyx.db.models import UserFile
 from onyx.db.models import UserGroup
 from onyx.db.notification import create_notification
+from onyx.file_store.models import CHAT_FILE_OWNER_USER_ID_KEY
 from onyx.server.features.persona.models import FullPersonaSnapshot
 from onyx.server.features.persona.models import MinimalPersonaSnapshot
 from onyx.server.features.persona.models import PersonaSharedNotificationData
@@ -145,6 +148,30 @@ def _add_user_filters(
     where_clause |= Persona.user_id == user.id
 
     return stmt.where(where_clause)
+
+
+def _user_can_use_persona_image(
+    image_id: str,
+    existing_persona: Persona | None,
+    user: User,
+    db_session: Session,
+) -> bool:
+    """An avatar must be the persona's current one, an image the user uploaded,
+    or the avatar of a persona the user can already view."""
+    if existing_persona is not None and existing_persona.uploaded_image_id == image_id:
+        return True
+
+    record = get_filerecord_by_file_id_optional(image_id, db_session)
+    if record is None or record.file_origin != FileOrigin.CHAT_UPLOAD:
+        return False
+
+    metadata = record.file_metadata if isinstance(record.file_metadata, dict) else {}
+    if metadata.get(CHAT_FILE_OWNER_USER_ID_KEY) == str(user.id):
+        return True
+
+    stmt = select(Persona).where(Persona.uploaded_image_id == image_id)
+    stmt = _add_user_filters(stmt=stmt, user=user, get_editable=False)
+    return db_session.scalars(stmt.limit(1)).first() is not None
 
 
 def fetch_persona_by_id_for_user(
@@ -988,6 +1015,27 @@ def upsert_persona(
         )
         if not user_files and user_file_ids:
             raise ValueError("user_files not found")
+        if user is not None:
+            already_attached_ids = (
+                {user_file.id for user_file in existing_persona.user_files}
+                if existing_persona
+                else set()
+            )
+            for user_file in user_files:
+                if (
+                    user_file.user_id != user.id
+                    and user_file.id not in already_attached_ids
+                ):
+                    raise ValueError(f"User file {user_file.id} not found")
+
+    if (
+        user is not None
+        and uploaded_image_id
+        and not _user_can_use_persona_image(
+            uploaded_image_id, existing_persona, user, db_session
+        )
+    ):
+        raise ValueError("Invalid uploaded_image_id")
 
     labels = None
     if label_ids is not None:

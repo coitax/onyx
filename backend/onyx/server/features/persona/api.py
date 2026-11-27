@@ -39,6 +39,7 @@ from onyx.db.persona import update_persona_shared
 from onyx.db.persona import update_persona_visibility
 from onyx.db.persona import update_personas_display_priority
 from onyx.file_store.file_store import get_default_file_store
+from onyx.file_store.models import build_chat_file_scope_metadata
 from onyx.file_store.models import ChatFileType
 from onyx.server.documents.models import PaginatedReturn
 from onyx.server.features.persona.constants import ADMIN_AGENTS_RESOURCE
@@ -279,7 +280,7 @@ def undelete_persona(
 @admin_router.post("/upload-image")
 def upload_file(
     file: UploadFile,
-    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> dict[str, str]:
     file_store = get_default_file_store()
     file_type = ChatFileType.IMAGE
@@ -288,6 +289,7 @@ def upload_file(
         display_name=file.filename,
         file_origin=FileOrigin.CHAT_UPLOAD,
         file_type=file.content_type or file_type.value,
+        file_metadata=build_chat_file_scope_metadata(owner_user_id=user.id),
     )
     return {"file_id": file_id}
 

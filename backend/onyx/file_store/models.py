@@ -1,9 +1,27 @@
 import base64
 from enum import Enum
 from typing import NotRequired
+from uuid import UUID
 from typing_extensions import TypedDict  # noreorder
 
 from pydantic import BaseModel
+
+# file_metadata keys on chat-scoped files (FileOrigin.CHAT_UPLOAD / CHAT_IMAGE_GEN)
+# that record who may download them through the chat file endpoint.
+CHAT_FILE_OWNER_USER_ID_KEY = "chat_file_owner_user_id"
+CHAT_FILE_CHAT_SESSION_ID_KEY = "chat_file_chat_session_id"
+
+
+def build_chat_file_scope_metadata(
+    owner_user_id: UUID | None,
+    chat_session_id: UUID | None = None,
+) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    if owner_user_id is not None:
+        metadata[CHAT_FILE_OWNER_USER_ID_KEY] = str(owner_user_id)
+    if chat_session_id is not None:
+        metadata[CHAT_FILE_CHAT_SESSION_ID_KEY] = str(chat_session_id)
+    return metadata
 
 
 class ChatFileType(str, Enum):

@@ -3,6 +3,7 @@ import mimetypes
 from io import BytesIO
 from typing import Any
 from typing import cast
+from uuid import UUID
 
 from pydantic import TypeAdapter
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from onyx.configs.app_configs import CODE_INTERPRETER_DEFAULT_TIMEOUT_MS
 from onyx.configs.app_configs import CODE_INTERPRETER_MAX_OUTPUT_LENGTH
 from onyx.configs.constants import FileOrigin
 from onyx.db.code_interpreter import fetch_code_interpreter_server
+from onyx.file_store.models import build_chat_file_scope_metadata
 from onyx.file_store.utils import build_full_frontend_file_url
 from onyx.file_store.utils import get_default_file_store
 from onyx.server.query_and_chat.placement import Placement
@@ -81,9 +83,17 @@ class PythonTool(Tool[PythonToolOverrideKwargs]):
     DISPLAY_NAME = "Code Interpreter"
     DESCRIPTION = "Execute Python code in an isolated sandbox environment."
 
-    def __init__(self, tool_id: int, emitter: Emitter) -> None:
+    def __init__(
+        self,
+        tool_id: int,
+        emitter: Emitter,
+        user_id: UUID | None = None,
+        chat_session_id: UUID | None = None,
+    ) -> None:
         super().__init__(emitter=emitter)
         self._id = tool_id
+        self._user_id = user_id
+        self._chat_session_id = chat_session_id
         # Cache of (filename, content_hash) -> ci_file_id to avoid re-uploading
         # the same file on every tool call iteration within the same agent session.
         # Filename is included in the key so two files with identical bytes but
@@ -286,6 +296,10 @@ class PythonTool(Tool[PythonToolOverrideKwargs]):
                             display_name=filename,
                             file_origin=FileOrigin.CHAT_UPLOAD,
                             file_type=mime_type,
+                            file_metadata=build_chat_file_scope_metadata(
+                                owner_user_id=self._user_id,
+                                chat_session_id=self._chat_session_id,
+                            ),
                         )
 
                         generated_files.append(

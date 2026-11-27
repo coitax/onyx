@@ -14,6 +14,7 @@ from requests import JSONDecodeError
 from onyx.chat.emitter import Emitter
 from onyx.configs.constants import FileOrigin
 from onyx.file_store.file_store import get_default_file_store
+from onyx.file_store.models import build_chat_file_scope_metadata
 from onyx.server.query_and_chat.placement import Placement
 from onyx.server.query_and_chat.streaming_models import CustomToolArgs
 from onyx.server.query_and_chat.streaming_models import CustomToolDelta
@@ -56,6 +57,8 @@ class CustomTool(Tool[None]):
         emitter: Emitter,
         custom_headers: list[HeaderItemDict] | None = None,
         user_oauth_token: str | None = None,
+        user_id: uuid.UUID | None = None,
+        chat_session_id: uuid.UUID | None = None,
     ) -> None:
         super().__init__(emitter=emitter)
 
@@ -64,6 +67,8 @@ class CustomTool(Tool[None]):
         self._tool_definition = self._method_spec.to_tool_definition()
         self._user_oauth_token = user_oauth_token
         self._id = id
+        self._user_id = user_id
+        self._chat_session_id = chat_session_id
 
         self._name = self._method_spec.name
         self._description = self._method_spec.summary
@@ -125,6 +130,10 @@ class CustomTool(Tool[None]):
             file_type=content_type,
             file_metadata={
                 "content_type": content_type,
+                **build_chat_file_scope_metadata(
+                    owner_user_id=self._user_id,
+                    chat_session_id=self._chat_session_id,
+                ),
             },
         )
 
@@ -278,6 +287,7 @@ def build_custom_tools_from_openapi_schema_and_headers(
     custom_headers: list[HeaderItemDict] | None = None,
     dynamic_schema_info: DynamicSchemaInfo | None = None,
     user_oauth_token: str | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> list[CustomTool]:
     if dynamic_schema_info:
         # Process dynamic schema information
@@ -308,6 +318,10 @@ def build_custom_tools_from_openapi_schema_and_headers(
             emitter=emitter,
             custom_headers=custom_headers,
             user_oauth_token=user_oauth_token,
+            user_id=user_id,
+            chat_session_id=(
+                dynamic_schema_info.chat_session_id if dynamic_schema_info else None
+            ),
         )
         for method_spec in method_specs
     ]

@@ -2,6 +2,7 @@ import json
 import threading
 from typing import Any
 from typing import cast
+from uuid import UUID
 
 import requests
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from onyx.chat.emitter import Emitter
 from onyx.configs.app_configs import IMAGE_MODEL_NAME
 from onyx.configs.app_configs import IMAGE_MODEL_PROVIDER
 from onyx.db.image_generation import get_default_image_generation_config
+from onyx.file_store.models import build_chat_file_scope_metadata
 from onyx.file_store.models import ChatFileType
 from onyx.file_store.utils import build_frontend_file_url
 from onyx.file_store.utils import load_chat_file_by_id
@@ -61,11 +63,15 @@ class ImageGenerationTool(Tool[ImageGenerationToolOverrideKwargs | None]):
         model: str = IMAGE_MODEL_NAME,
         provider: str = IMAGE_MODEL_PROVIDER,
         num_imgs: int = 1,
+        user_id: UUID | None = None,
+        chat_session_id: UUID | None = None,
     ) -> None:
         super().__init__(emitter=emitter)
         self.model = model
         self.provider = provider
         self.num_imgs = num_imgs
+        self._user_id = user_id
+        self._chat_session_id = chat_session_id
 
         self.img_provider = get_image_generation_provider(
             provider, image_generation_credentials
@@ -272,6 +278,28 @@ class ImageGenerationTool(Tool[ImageGenerationToolOverrideKwargs | None]):
             reference_image_file_ids = [
                 file_id.strip() for file_id in raw_reference_ids if file_id.strip()
             ]
+            # Only images generated earlier in this chat may be referenced;
+            # other file ids would read files outside the conversation.
+            allowed_reference_ids = set(
+                override_kwargs.recent_generated_image_file_ids
+                if override_kwargs
+                else []
+            )
+            disallowed_ids = [
+                file_id
+                for file_id in reference_image_file_ids
+                if file_id not in allowed_reference_ids
+            ]
+            if disallowed_ids:
+                raise ToolCallException(
+                    message=(
+                        f"Reference image file ids not generated in this chat: {disallowed_ids}"
+                    ),
+                    llm_facing_message=(
+                        f"Reference image file ids {disallowed_ids} are not available. "
+                        "Use file_id values returned by previous generate_image calls in this chat."
+                    ),
+                )
         elif (
             override_kwargs
             and override_kwargs.recent_generated_image_file_ids
@@ -450,6 +478,9 @@ class ImageGenerationTool(Tool[ImageGenerationToolOverrideKwargs | None]):
         file_ids = save_files(
             urls=[],
             base64_files=[img.image_data for img in image_generation_responses],
+            file_metadata=build_chat_file_scope_metadata(
+                owner_user_id=self._user_id, chat_session_id=self._chat_session_id
+            ),
         )
         generated_images_metadata = [
             GeneratedImage(
