@@ -1,6 +1,10 @@
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import SplitResult
+from urllib.parse import unquote
+from urllib.parse import urljoin
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -239,6 +243,24 @@ EXCLUDED_HEADERS = {
     "set-cookie",
 }
 
+# Only these client request headers reach the sandbox. Cookies, auth headers,
+# and anything else the caller sends (e.g. cloud metadata probes) are dropped.
+FORWARDED_REQUEST_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-language",
+        "accept-encoding",
+        "user-agent",
+        "range",
+        "if-none-match",
+        "if-modified-since",
+        "if-range",
+        "cache-control",
+    }
+)
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
 
 def _stream_response(response: httpx.Response) -> Iterator[bytes]:
     """Stream the response content in chunks."""
@@ -335,6 +357,53 @@ def _rewrite_proxy_response_headers(
     return headers
 
 
+def _origin(parts: SplitResult) -> tuple[str, str, int] | None:
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not parts.hostname:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    return scheme, parts.hostname.lower(), port or _DEFAULT_PORTS[scheme]
+
+
+def _rewrite_redirect_location(
+    location: str, base_url: str, target_url: str, session_id: str
+) -> str | None:
+    """Map a sandbox redirect Location onto the webapp proxy prefix.
+
+    Returns None unless the Location resolves to the sandbox's own origin, so
+    the browser is never sent (and the API server never goes) anywhere else.
+    """
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F or ch == "\\" for ch in location):
+        return None
+    # Browsers read "http:host/x" and "http:/host/x" as absolute URLs, while
+    # urljoin treats them as relative paths.
+    scheme = urlsplit(location).scheme
+    if scheme and not location[len(scheme) + 1 :].startswith("//"):
+        return None
+
+    resolved = urlsplit(urljoin(target_url, location))
+    base = urlsplit(base_url)
+    if resolved.username is not None or resolved.password is not None:
+        return None
+    resolved_origin = _origin(resolved)
+    if resolved_origin is None or resolved_origin != _origin(base):
+        return None
+
+    path = resolved.path or "/"
+    if any(unquote(segment) in (".", "..") for segment in path.split("/")):
+        return None
+
+    rewritten = f"/api/build/sessions/{session_id}/webapp{path}"
+    if resolved.query:
+        rewritten = f"{rewritten}?{resolved.query}"
+    if resolved.fragment:
+        rewritten = f"{rewritten}#{resolved.fragment}"
+    return rewritten
+
+
 # Content types that may contain asset path references that need rewriting
 REWRITABLE_CONTENT_TYPES = {
     "text/html",
@@ -394,14 +463,15 @@ def _proxy_request(
     logger.debug(f"Proxying request to: {target_url}")
 
     try:
-        # Make the request to the target URL
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        # The sandbox app is user-controlled: never follow its redirects from
+        # the API server's network position.
+        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
             response = client.get(
                 target_url,
                 headers={
                     key: value
                     for key, value in request.headers.items()
-                    if key.lower() not in ("host", "content-length")
+                    if key.lower() in FORWARDED_REQUEST_HEADERS
                 },
             )
 
@@ -409,11 +479,22 @@ def _proxy_request(
             response_headers = {
                 key: value
                 for key, value in response.headers.items()
-                if key.lower() not in EXCLUDED_HEADERS
+                if key.lower() not in EXCLUDED_HEADERS and key.lower() != "location"
             }
             response_headers = _rewrite_proxy_response_headers(
                 response_headers, str(session_id)
             )
+            location = response.headers.get("location")
+            if location is not None:
+                rewritten_location = _rewrite_redirect_location(
+                    location, base_url, target_url, str(session_id)
+                )
+                if rewritten_location is not None:
+                    response_headers["location"] = rewritten_location
+                else:
+                    logger.warning(
+                        f"Dropping off-origin redirect Location from sandbox for session {session_id}"
+                    )
 
             content_type = response.headers.get("content-type", "")
 
@@ -439,7 +520,9 @@ def _proxy_request(
     except httpx.TimeoutException:
         logger.error(f"Timeout while proxying request to {target_url}")
         raise HTTPException(status_code=504, detail="Gateway timeout")
-    except httpx.RequestError as e:
+    except (httpx.RequestError, httpx.InvalidURL) as e:
+        # httpx parses a sandbox Location header even with redirects disabled,
+        # so a malformed one surfaces here as InvalidURL.
         logger.error(f"Error proxying request to {target_url}: {e}")
         raise HTTPException(status_code=502, detail="Bad gateway")
 
