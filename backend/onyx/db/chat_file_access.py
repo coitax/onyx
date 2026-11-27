@@ -6,12 +6,15 @@ Access is decided by the origin of the stored file that would be streamed:
   view a persona the user file is attached to, or any user when the owner
   referenced the blob in one of their publicly shared chat sessions.
 - CHAT_UPLOAD / CHAT_IMAGE_GEN: the user recorded as the creator, users who can
-  read the chat session the file was created in or that references it, and
-  users who can view a persona using it as its avatar.
+  read the chat session the file was created in or that references it (as a
+  message attachment, a generated image, or, in the caller's own sessions, a
+  python / custom tool output), and users who can view a persona using it as
+  its avatar.
 - Every other origin (connector files, indexing checkpoints and batches,
   snapshots, caches, reports, ...) is never served.
 """
 
+import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -29,6 +32,7 @@ from onyx.db.models import ChatSession
 from onyx.db.models import FileRecord
 from onyx.db.models import Persona
 from onyx.db.models import Persona__UserFile
+from onyx.db.models import Tool
 from onyx.db.models import ToolCall
 from onyx.db.models import User
 from onyx.db.models import UserFile
@@ -37,6 +41,9 @@ from onyx.file_store.models import CHAT_FILE_CHAT_SESSION_ID_KEY
 from onyx.file_store.models import CHAT_FILE_OWNER_USER_ID_KEY
 
 _CHAT_SCOPED_ORIGINS = frozenset({FileOrigin.CHAT_UPLOAD, FileOrigin.CHAT_IMAGE_GEN})
+# Tool.in_code_tool_id of the code interpreter tool (PythonTool.__name__)
+_PYTHON_TOOL_IN_CODE_ID = "PythonTool"
+_CUSTOM_TOOL_FILE_RESPONSE_TYPES = ("image", "csv")
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,69 @@ def _user_can_access_user_file(
     return shared_by_owner is not None
 
 
+def _file_ids_in_tool_call_output(response: str, is_python_tool: bool) -> list[str]:
+    """File ids that a python or custom tool wrote into its saved response.
+
+    Only fields the server fills in are read; free-form output such as stdout
+    or a custom tool's JSON body is ignored.
+    """
+    try:
+        parsed = json.loads(response)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+
+    if is_python_tool:
+        if parsed.get("type") != "python_execution":
+            return []
+        generated_files = parsed.get("generated_files")
+        if not isinstance(generated_files, list):
+            return []
+        return [
+            generated_file["file_link"].rsplit("/", 1)[-1]
+            for generated_file in generated_files
+            if isinstance(generated_file, dict)
+            and isinstance(generated_file.get("file_link"), str)
+        ]
+
+    if parsed.get("response_type") not in _CUSTOM_TOOL_FILE_RESPONSE_TYPES:
+        return []
+    tool_result = parsed.get("tool_result")
+    if not isinstance(tool_result, dict):
+        return []
+    file_ids = tool_result.get("file_ids")
+    if not isinstance(file_ids, list):
+        return []
+    return [file_id for file_id in file_ids if isinstance(file_id, str)]
+
+
+def _referenced_by_own_tool_call_output(
+    blob_id: str, user: User, db_session: Session
+) -> bool:
+    """Covers tool outputs saved before files recorded their creator."""
+    rows = db_session.execute(
+        select(
+            ToolCall.tool_call_response,
+            Tool.in_code_tool_id,
+            Tool.openapi_schema.is_not(None),
+        )
+        .join(ChatSession, ToolCall.chat_session_id == ChatSession.id)
+        .join(Tool, ToolCall.tool_id == Tool.id)
+        .where(
+            ChatSession.user_id == user.id,
+            ToolCall.tool_call_response.contains(blob_id, autoescape=True),
+        )
+    ).all()
+    for response, in_code_tool_id, is_custom_tool in rows:
+        is_python_tool = in_code_tool_id == _PYTHON_TOOL_IN_CODE_ID
+        if not is_python_tool and not is_custom_tool:
+            continue
+        if blob_id in _file_ids_in_tool_call_output(response, is_python_tool):
+            return True
+    return False
+
+
 def _user_can_access_chat_scoped_file(
     blob_id: str,
     file_metadata: Any,
@@ -179,6 +249,9 @@ def _user_can_access_chat_scoped_file(
         .limit(1)
     )
     if generated_image_call is not None:
+        return True
+
+    if _referenced_by_own_tool_call_output(blob_id, user, db_session):
         return True
 
     avatar_persona_ids = list(
