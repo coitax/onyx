@@ -63,7 +63,7 @@ def _make_creation_request(
     enable_contextual_rag: bool = True,
 ) -> SearchSettingsCreationRequest:
     return SearchSettingsCreationRequest(
-        model_name="test-embedding-model",
+        model_name="nomic-ai/nomic-embed-text-v1",
         model_dim=768,
         normalize=True,
         query_prefix="",
@@ -85,7 +85,7 @@ def _make_saved_search_settings(
     enable_contextual_rag: bool = True,
 ) -> SavedSearchSettings:
     return SavedSearchSettings(
-        model_name="test-embedding-model",
+        model_name="nomic-ai/nomic-embed-text-v1",
         model_dim=768,
         normalize=True,
         query_prefix="",

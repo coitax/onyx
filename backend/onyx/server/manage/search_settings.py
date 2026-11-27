@@ -27,6 +27,8 @@ from onyx.db.search_settings import update_current_search_settings
 from onyx.db.search_settings import update_search_settings_status
 from onyx.document_index.factory import get_all_document_indices
 from onyx.document_index.factory import get_default_document_index
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_processing.unstructured import delete_unstructured_api_key
 from onyx.file_processing.unstructured import get_unstructured_api_key
 from onyx.file_processing.unstructured import update_unstructured_api_key
@@ -37,6 +39,7 @@ from onyx.server.models import IdReturn
 from onyx.server.utils_vector_db import require_vector_db
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import ALT_INDEX_SUFFIX
+from shared_configs.configs import is_local_embedding_model_allowed
 from shared_configs.configs import MULTI_TENANT
 
 router = APIRouter(prefix="/search-settings")
@@ -61,6 +64,16 @@ def set_new_search_settings(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Contextual RAG disabled in Onyx Cloud",
+        )
+
+    if (
+        search_settings_new.provider_type is None
+        and not is_local_embedding_model_allowed(search_settings_new.model_name)
+    ):
+        raise OnyxError(
+            OnyxErrorCode.VALIDATION_ERROR,
+            f"Self-hosted embedding model '{search_settings_new.model_name}' is not "
+            "allowed. Ask your Onyx operator to add it to ALLOWED_LOCAL_EMBEDDING_MODELS.",
         )
 
     # Validate cloud provider exists or create new LiteLLM provider.

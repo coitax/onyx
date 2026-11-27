@@ -41,6 +41,51 @@ INTENT_MODEL_TAG: str | None = None
 # Bi-Encoder, other details
 DOC_EMBEDDING_CONTEXT_SIZE = 512
 
+
+def _parse_model_list(env_var: str) -> set[str]:
+    return {
+        name.strip()
+        for name in (os.environ.get(env_var) or "").split(",")
+        if name.strip()
+    }
+
+
+# Local (self-hosted) embedding models the model server is allowed to load. The
+# model name comes from admin-editable search settings (every tenant admin in
+# multi-tenant deployments), and loading a Hugging Face repo can execute code
+# shipped in that repo, so any name outside this set is refused. Operators can
+# allow more models with ALLOWED_LOCAL_EMBEDDING_MODELS (comma separated); the
+# DOCUMENT_ENCODER_MODEL env override is also allowed.
+DEFAULT_ALLOWED_LOCAL_EMBEDDING_MODELS = frozenset(
+    {
+        "nomic-ai/nomic-embed-text-v1",
+        "intfloat/e5-base-v2",
+        "intfloat/e5-small-v2",
+        "intfloat/multilingual-e5-base",
+        "intfloat/multilingual-e5-small",
+        "thenlper/gte-small",
+    }
+)
+ALLOWED_LOCAL_EMBEDDING_MODELS = frozenset(
+    DEFAULT_ALLOWED_LOCAL_EMBEDDING_MODELS
+    | _parse_model_list("ALLOWED_LOCAL_EMBEDDING_MODELS")
+    | _parse_model_list("DOCUMENT_ENCODER_MODEL")
+)
+
+# Allowed local embedding models that need custom modeling code from their repo
+# (trust_remote_code). Every other model is loaded without remote code. Operators
+# can add models with TRUST_REMOTE_CODE_EMBEDDING_MODELS (comma separated); a
+# model listed there must also be in ALLOWED_LOCAL_EMBEDDING_MODELS.
+TRUST_REMOTE_CODE_EMBEDDING_MODELS = frozenset(
+    {"nomic-ai/nomic-embed-text-v1"}
+    | _parse_model_list("TRUST_REMOTE_CODE_EMBEDDING_MODELS")
+)
+
+
+def is_local_embedding_model_allowed(model_name: str | None) -> bool:
+    return model_name is not None and model_name in ALLOWED_LOCAL_EMBEDDING_MODELS
+
+
 # Used to distinguish alternative indices
 ALT_INDEX_SUFFIX = "__danswer_alt_index"
 
