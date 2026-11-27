@@ -26,7 +26,7 @@ from onyx.db.models import ChatSession
 from onyx.db.models import Persona
 from onyx.db.models import SearchDoc as DbSearchDoc
 from onyx.db.models import UserFile
-from onyx.db.projects import check_project_ownership
+from onyx.db.projects import get_owned_project_for_update
 from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import ChatFileType
@@ -127,17 +127,25 @@ def create_chat_session_from_request(
         ValueError: If user lacks access to the specified project
         Exception: If the persona is invalid
     """
-    project_id = chat_session_request.project_id
-    if project_id:
-        if not check_project_ownership(project_id, user_id, db_session):
+    project_id: int | None = None
+    if chat_session_request.project_id:
+        project = (
+            get_owned_project_for_update(
+                chat_session_request.project_id, user_id, db_session
+            )
+            if user_id is not None
+            else None
+        )
+        if project is None:
             raise ValueError("User does not have access to project")
+        project_id = project.id
 
     return create_chat_session(
         db_session=db_session,
         description=chat_session_request.description or "",
         user_id=user_id,
         persona_id=chat_session_request.persona_id,
-        project_id=chat_session_request.project_id,
+        project_id=project_id,
     )
 
 
@@ -777,8 +785,15 @@ def get_custom_agent_prompt(persona: Persona, chat_session: ChatSession) -> str 
         return persona.system_prompt or None
 
     # If in a project and using the default Agent, respect the project instructions.
-    if chat_session.project and chat_session.project.instructions:
-        return chat_session.project.instructions
+    # Only the session owner's own project may contribute instructions.
+    project = chat_session.project
+    if (
+        project
+        and project.instructions
+        and chat_session.user_id is not None
+        and project.user_id == chat_session.user_id
+    ):
+        return project.instructions
 
     return None
 
