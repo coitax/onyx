@@ -42,6 +42,54 @@ TEXT_SECTION_SEPARATOR = "\n\n"
 
 _MARKITDOWN_CONVERTER: Optional["MarkItDown"] = None
 
+
+def _harden_libtiff_tiff_encoder() -> None:
+    """Drop attacker-controlled TIFF tags that would crash the libtiff encoder.
+
+    Pillow's libtiff TIFF encoder forwards tag values to ``TIFFSetField()``
+    without checking them against libtiff's own field definition for most core
+    tags. A TIFF whose ``DocumentName`` or ``InkNames`` tag is stored with a
+    numeric type is loaded as an ``int`` and then handed to libtiff where it
+    expects a ``char *``, which libtiff dereferences as a pointer and reads out
+    of bounds (GHSA-xvh5-g6gv-559v). Pillow 13.0.0 added validation for custom
+    tags and a few special core tags, but core ASCII tags such as these two are
+    still forwarded unchecked.
+
+    We extract images from uploaded PDFs via ``pypdf``, which re-saves an
+    embedded TIFF through the same encoder before we ever see it, so the patch
+    has to cover every TIFF save in the process, not just our own. Wrapping the
+    registered TIFF save handler drops any core ASCII tag whose value is not a
+    string before the encoder runs, leaving every other tag untouched. Remove
+    this once Pillow validates these tags itself.
+    """
+    from PIL import TiffImagePlugin
+    from PIL import TiffTags
+
+    original_save = getattr(TiffImagePlugin, "_save")
+    if getattr(original_save, "_onyx_hardened", False):
+        return
+
+    core_ascii_tags = tuple(
+        tag
+        for tag in TiffTags.LIBTIFF_CORE
+        if TiffTags.lookup(tag).type == TiffTags.ASCII
+    )
+
+    def _save(image: Image.Image, fp: IO[bytes], filename: str | bytes) -> None:
+        ifd = getattr(image, "tag_v2", None)
+        if ifd is not None:
+            for tag in core_ascii_tags:
+                if tag in ifd and not isinstance(ifd[tag], str):
+                    del ifd[tag]
+        original_save(image, fp, filename)
+
+    _save._onyx_hardened = True  # type: ignore[attr-defined]
+    setattr(TiffImagePlugin, "_save", _save)
+    Image.register_save(TiffImagePlugin.TiffImageFile.format, _save)
+
+
+_harden_libtiff_tiff_encoder()
+
 KNOWN_OPENPYXL_BUGS = [
     "Value must be either numerical or a string containing a wildcard",
     "File contains no valid workbook part",
