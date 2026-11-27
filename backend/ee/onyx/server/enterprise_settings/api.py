@@ -36,6 +36,7 @@ from onyx.db.enums import Permission
 from onyx.db.models import User
 from onyx.file_store.file_store import get_default_file_store
 from onyx.server.utils import BasicAuthenticationError
+from onyx.utils.file import get_safe_file_response_params
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
@@ -159,10 +160,11 @@ def fetch_logo_helper(db_session: Session) -> Response:  # noqa: ARG001
             detail="No logo file found",
         )
     else:
+        media_type, safety_headers = get_safe_file_response_params(onyx_file.mime_type)
         return Response(
             content=onyx_file.data,
-            media_type=onyx_file.mime_type,
-            headers={"Cache-Control": "no-cache"},
+            media_type=media_type,
+            headers={"Cache-Control": "no-cache", **safety_headers},
         )
 
 
@@ -178,7 +180,10 @@ def fetch_logotype_helper(db_session: Session) -> Response:  # noqa: ARG001
             detail="No logotype file found",
         )
     else:
-        return Response(content=onyx_file.data, media_type=onyx_file.mime_type)
+        media_type, safety_headers = get_safe_file_response_params(onyx_file.mime_type)
+        return Response(
+            content=onyx_file.data, media_type=media_type, headers=safety_headers
+        )
 
 
 @basic_router.get("/logotype")

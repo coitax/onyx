@@ -99,6 +99,7 @@ from onyx.server.usage_limits import check_usage_and_raise
 from onyx.server.usage_limits import is_usage_limits_enabled
 from onyx.server.utils import get_json_line
 from onyx.tracing.framework.create import ensure_trace
+from onyx.utils.file import get_safe_file_response_params
 from onyx.utils.headers import get_custom_tool_additional_request_headers
 from onyx.utils.logger import setup_logger
 from onyx.utils.telemetry import mt_cloud_telemetry
@@ -880,7 +881,7 @@ def fetch_chat_file(
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found")
 
-    media_type = file_record.file_type
+    media_type, safety_headers = get_safe_file_response_params(file_record.file_type)
     file_io = file_store.read_file(file_id, mode="b")
 
     # Files served here are immutable (content-addressed by file_id), so allow long-lived caching.
@@ -895,7 +896,11 @@ def fetch_chat_file(
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cache_headers)
 
-    return StreamingResponse(file_io, media_type=media_type, headers=cache_headers)
+    return StreamingResponse(
+        file_io,
+        media_type=media_type,
+        headers={**cache_headers, **safety_headers},
+    )
 
 
 @router.get("/search", tags=PUBLIC_API_TAGS)
