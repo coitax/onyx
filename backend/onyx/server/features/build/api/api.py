@@ -11,6 +11,7 @@ from fastapi import Request
 from fastapi import Response
 from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
+from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
 
 from onyx.auth.permissions import require_permission
@@ -18,6 +19,7 @@ from onyx.auth.users import optional_user
 from onyx.configs.constants import DocumentSource
 from onyx.db.connector_credential_pair import get_connector_credential_pairs_for_user
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.engine.sql_engine import get_session_with_tenant
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.enums import IndexingStatus
 from onyx.db.enums import Permission
@@ -26,6 +28,7 @@ from onyx.db.enums import SharingScope
 from onyx.db.index_attempt import get_latest_index_attempt_for_cc_pair_id
 from onyx.db.models import BuildSession
 from onyx.db.models import User
+from onyx.db.users import fetch_user_by_id
 from onyx.server.features.build.api.messages_api import router as messages_router
 from onyx.server.features.build.api.models import BuildConnectorInfo
 from onyx.server.features.build.api.models import BuildConnectorListResponse
@@ -34,11 +37,14 @@ from onyx.server.features.build.api.models import RateLimitResponse
 from onyx.server.features.build.api.rate_limit import get_user_rate_limit_status
 from onyx.server.features.build.api.sessions_api import router as sessions_router
 from onyx.server.features.build.api.user_library import router as user_library_router
+from onyx.server.features.build.api.webapp_grant import load_webapp_grant
+from onyx.server.features.build.api.webapp_grant import mint_webapp_grant
 from onyx.server.features.build.db.sandbox import get_sandbox_by_user_id
 from onyx.server.features.build.sandbox import get_sandbox_manager
 from onyx.server.features.build.session.manager import SessionManager
 from onyx.server.features.build.utils import is_onyx_craft_enabled
 from onyx.utils.logger import setup_logger
+from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 
 logger = setup_logger()
 
@@ -231,13 +237,31 @@ def get_build_connectors(
 # Headers to skip when proxying.
 # Hop-by-hop headers must not be forwarded, and set-cookie is stripped to
 # prevent LLM-generated apps from setting cookies on the parent Onyx domain.
+# The sandbox's own CSP is replaced by _WEBAPP_SANDBOX_CSP.
 EXCLUDED_HEADERS = {
     "content-encoding",
     "content-length",
     "transfer-encoding",
     "connection",
     "set-cookie",
+    "content-security-policy",
 }
+
+# Webapp content is written by the sandbox and is served from the Onyx origin,
+# so every proxied response must run in an opaque origin. Never add
+# allow-same-origin: it would give the content the viewer's Onyx session.
+_WEBAPP_SANDBOX_CSP = (
+    "sandbox allow-scripts allow-forms allow-popups "
+    "allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+)
+
+
+def _webapp_base_path(session_id: str) -> str:
+    return f"/api/build/sessions/{session_id}/webapp"
+
+
+def _webapp_grant_base_path(session_id: str, grant: str) -> str:
+    return f"/api/build/sessions/{session_id}/webapp-assets/{grant}"
 
 
 def _stream_response(response: httpx.Response) -> Iterator[bytes]:
@@ -246,9 +270,11 @@ def _stream_response(response: httpx.Response) -> Iterator[bytes]:
         yield chunk
 
 
-def _inject_hmr_fixer(content: bytes, session_id: str) -> bytes:
+def _inject_hmr_fixer(
+    content: bytes, session_id: str, base_path: str | None = None
+) -> bytes:
     """Inject a script that stubs root-scoped Next HMR websocket connections."""
-    base = f"/api/build/sessions/{session_id}/webapp"
+    base = base_path or _webapp_base_path(session_id)
     script = f"<script>{_WEBAPP_HMR_FIXER_TEMPLATE.replace('__WEBAPP_BASE__', base)}</script>"
     text = content.decode("utf-8")
     text = re.sub(
@@ -261,9 +287,11 @@ def _inject_hmr_fixer(content: bytes, session_id: str) -> bytes:
     return text.encode("utf-8")
 
 
-def _rewrite_asset_paths(content: bytes, session_id: str) -> bytes:
+def _rewrite_asset_paths(
+    content: bytes, session_id: str, base_path: str | None = None
+) -> bytes:
     """Rewrite Next.js asset paths to go through the proxy."""
-    webapp_base_path = f"/api/build/sessions/{session_id}/webapp"
+    webapp_base_path = base_path or _webapp_base_path(session_id)
     escaped_webapp_base_path = webapp_base_path.replace("/", r"\/")
     hmr_paths = ("/_next/webpack-hmr", "/_next/hmr")
 
@@ -317,12 +345,12 @@ def _rewrite_asset_paths(content: bytes, session_id: str) -> bytes:
 
 
 def _rewrite_proxy_response_headers(
-    headers: dict[str, str], session_id: str
+    headers: dict[str, str], session_id: str, base_path: str | None = None
 ) -> dict[str, str]:
     """Rewrite response headers that can leak root-scoped asset URLs."""
     link = headers.get("link")
     if link:
-        webapp_base_path = f"/api/build/sessions/{session_id}/webapp"
+        webapp_base_path = base_path or _webapp_base_path(session_id)
         rewritten_link = re.sub(
             r"<https?://[^>]+/_next/",
             f"<{webapp_base_path}/_next/",
@@ -379,10 +407,21 @@ def _get_sandbox_url(session_id: UUID, db_session: Session) -> str:
 
 
 def _proxy_request(
-    path: str, request: Request, session_id: UUID, db_session: Session
+    path: str,
+    request: Request,
+    session_id: UUID,
+    db_session: Session,
+    asset_base_path: str | None = None,
+    allow_cross_origin_read: bool = False,
 ) -> StreamingResponse | Response:
-    """Proxy a request to the sandbox's Next.js server."""
+    """Proxy a request to the sandbox's Next.js server.
+
+    `asset_base_path` is the prefix that asset references in the response are
+    rewritten to. `allow_cross_origin_read` lets the sandboxed (opaque-origin)
+    document read the response, e.g. for fonts and fetch().
+    """
     base_url = _get_sandbox_url(session_id, db_session)
+    webapp_base_path = asset_base_path or _webapp_base_path(str(session_id))
 
     # Build the target URL
     target_url = f"{base_url}/{path.lstrip('/')}"
@@ -412,16 +451,25 @@ def _proxy_request(
                 if key.lower() not in EXCLUDED_HEADERS
             }
             response_headers = _rewrite_proxy_response_headers(
-                response_headers, str(session_id)
+                response_headers, str(session_id), webapp_base_path
             )
+            response_headers["content-security-policy"] = _WEBAPP_SANDBOX_CSP
+            response_headers["x-content-type-options"] = "nosniff"
+            if allow_cross_origin_read:
+                response_headers["access-control-allow-origin"] = "*"
+                response_headers.pop("access-control-allow-credentials", None)
 
             content_type = response.headers.get("content-type", "")
 
             # For HTML/CSS/JS responses, rewrite asset paths
             if any(ct in content_type for ct in REWRITABLE_CONTENT_TYPES):
-                content = _rewrite_asset_paths(response.content, str(session_id))
+                content = _rewrite_asset_paths(
+                    response.content, str(session_id), webapp_base_path
+                )
                 if "text/html" in content_type:
-                    content = _inject_hmr_fixer(content, str(session_id))
+                    content = _inject_hmr_fixer(
+                        content, str(session_id), webapp_base_path
+                    )
                 return Response(
                     content=content,
                     status_code=response.status_code,
@@ -501,17 +549,94 @@ def get_webapp(
     Returns a friendly offline page when the sandbox is not running.
     """
     try:
-        _check_webapp_access(session_id, user, db_session)
+        build_session = _check_webapp_access(session_id, user, db_session)
     except HTTPException as e:
         if e.status_code == 401:
             return RedirectResponse(url="/auth/login", status_code=302)
         raise
     try:
-        return _proxy_request(path, request, session_id, db_session)
+        return _proxy_request(
+            path,
+            request,
+            build_session.id,
+            db_session,
+            asset_base_path=_mint_asset_base_path(build_session.id, user),
+        )
     except HTTPException as e:
         if e.status_code in (502, 503, 504):
             return _offline_html_response()
         raise
+
+
+def _mint_asset_base_path(session_id: UUID, viewer: User | None) -> str | None:
+    """Bind the sandboxed document's sub-resources to this authorization.
+
+    Without a grant the document still loads sandboxed, but its assets can
+    only load when the session is public_global.
+    """
+    try:
+        grant = mint_webapp_grant(session_id, viewer.id if viewer else None)
+    except RedisError:
+        logger.exception("Failed to mint Craft webapp asset grant")
+        return None
+    return _webapp_grant_base_path(str(session_id), grant)
+
+
+@public_build_router.get(
+    "/sessions/{session_id}/webapp-assets/{grant}", response_model=None
+)
+@public_build_router.get(
+    "/sessions/{session_id}/webapp-assets/{grant}/{path:path}", response_model=None
+)
+def get_webapp_asset(
+    session_id: UUID,
+    grant: str,
+    request: Request,
+    path: str = "",
+) -> StreamingResponse | Response:
+    """Proxy a sub-resource requested by a sandboxed webapp document.
+
+    The sandboxed document has an opaque origin, so these requests carry no
+    Onyx cookies. Access is re-checked on every request as the viewer the
+    grant was minted for, against the session and tenant it was minted in.
+    """
+    webapp_grant = load_webapp_grant(grant)
+    if webapp_grant is None or webapp_grant.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    tenant_token = CURRENT_TENANT_ID_CONTEXTVAR.set(webapp_grant.tenant_id)
+    try:
+        with get_session_with_tenant(tenant_id=webapp_grant.tenant_id) as db_session:
+            viewer: User | None = None
+            if webapp_grant.viewer_id is not None:
+                viewer = fetch_user_by_id(db_session, webapp_grant.viewer_id)
+                if viewer is None or not viewer.is_active:
+                    raise HTTPException(status_code=404, detail="Session not found")
+            try:
+                build_session = _check_webapp_access(
+                    webapp_grant.session_id, viewer, db_session
+                )
+            except HTTPException as e:
+                if e.status_code == 401:
+                    raise HTTPException(status_code=404, detail="Session not found")
+                raise
+            try:
+                return _proxy_request(
+                    path,
+                    request,
+                    build_session.id,
+                    db_session,
+                    asset_base_path=_webapp_grant_base_path(
+                        str(build_session.id), grant
+                    ),
+                    allow_cross_origin_read=True,
+                )
+            except HTTPException as e:
+                if e.status_code in (502, 503, 504):
+                    return _offline_html_response()
+                raise
+    finally:
+        CURRENT_TENANT_ID_CONTEXTVAR.reset(tenant_token)
 
 
 # =============================================================================
