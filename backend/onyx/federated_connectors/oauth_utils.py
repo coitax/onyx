@@ -90,15 +90,25 @@ def generate_oauth_state(
     return state_b64
 
 
-def verify_oauth_state(state: str) -> OAuthSession:
+class OAuthStateUserMismatchError(Exception):
+    """Raised when an OAuth state was issued to a different user than the caller."""
+
+
+def verify_oauth_state(state: str, *, expected_user_id: str) -> OAuthSession:
     """
     Verify OAuth state parameter and retrieve session data.
 
     Args:
         state: Base64-encoded state parameter from OAuth callback
+        expected_user_id: ID of the authenticated user completing the callback.
+            The state is only consumed if it was issued to this user.
 
     Returns:
-        OAuthSession if state is valid, None otherwise
+        OAuthSession if state is valid
+
+    Raises:
+        ValueError: if the state is malformed, unknown, or expired
+        OAuthStateUserMismatchError: if the state belongs to another user
     """
     # Add padding if needed for base64 decoding
     padded_state = state + "=" * (-len(state) % 4)
@@ -114,10 +124,17 @@ def verify_oauth_state(state: str) -> OAuthSession:
     if not session_data:
         raise ValueError(f"OAuth state not found: {state}")
 
+    session = OAuthSession.from_dict(json.loads(session_data))
+
+    # Checked before deleting so another user cannot burn this user's pending state.
+    if str(session.user_id) != str(expected_user_id):
+        raise OAuthStateUserMismatchError(
+            "OAuth state was not issued to the authenticated user"
+        )
+
     cache.delete(cache_key)
 
-    session_dict = json.loads(session_data)
-    return OAuthSession.from_dict(session_dict)
+    return session
 
 
 def get_oauth_callback_uri() -> str:

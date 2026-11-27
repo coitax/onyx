@@ -1,6 +1,5 @@
 import json
 from typing import Any
-from uuid import UUID
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -30,6 +29,7 @@ from onyx.federated_connectors.interfaces import FederatedConnector
 from onyx.federated_connectors.oauth_utils import add_state_to_oauth_url
 from onyx.federated_connectors.oauth_utils import generate_oauth_state
 from onyx.federated_connectors.oauth_utils import get_oauth_callback_uri
+from onyx.federated_connectors.oauth_utils import OAuthStateUserMismatchError
 from onyx.federated_connectors.oauth_utils import verify_oauth_state
 from onyx.server.federated.models import AuthorizeUrlResponse
 from onyx.server.federated.models import ConfigurationSchemaResponse
@@ -369,7 +369,7 @@ def get_authorize_url(
 @router.post("/callback")
 def handle_oauth_callback_generic(
     request: Request,
-    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> OAuthCallbackResult:
     """Handle callback for any federated connector using state parameter"""
@@ -382,7 +382,15 @@ def handle_oauth_callback_generic(
         raise HTTPException(status_code=400, detail="Missing state parameter")
 
     try:
-        oauth_session = verify_oauth_state(state)
+        oauth_session = verify_oauth_state(state, expected_user_id=str(user.id))
+    except OAuthStateUserMismatchError:
+        logger.warning(
+            f"Rejected federated OAuth callback: state not issued to user_id={user.id}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="OAuth state does not belong to the current user",
+        )
     except ValueError:
         logger.exception("Error verifying OAuth state")
         raise HTTPException(
@@ -431,12 +439,12 @@ def handle_oauth_callback_generic(
     # Store OAuth token in database if we have an access token
     if oauth_result.access_token:
         logger.info(
-            f"Storing OAuth token for federated_connector_id={federated_connector_id}, user_id={oauth_session.user_id}"
+            f"Storing OAuth token for federated_connector_id={federated_connector_id}, user_id={user.id}"
         )
         update_federated_connector_oauth_token(
             db_session=db_session,
             federated_connector_id=federated_connector_id,
-            user_id=UUID(oauth_session.user_id),
+            user_id=user.id,
             token=oauth_result.access_token,
             expires_at=oauth_result.expires_at,
         )

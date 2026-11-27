@@ -22,6 +22,7 @@ from onyx.db.oauth_config import get_tools_by_oauth_config
 from onyx.db.oauth_config import update_oauth_config
 from onyx.db.oauth_config import upsert_user_oauth_token
 from onyx.federated_connectors.oauth_utils import generate_oauth_state
+from onyx.federated_connectors.oauth_utils import OAuthStateUserMismatchError
 from onyx.federated_connectors.oauth_utils import verify_oauth_state
 from onyx.server.features.oauth_config.models import OAuthCallbackResponse
 from onyx.server.features.oauth_config.models import OAuthConfigCreate
@@ -203,13 +204,7 @@ def handle_oauth_callback(
     """
     try:
         # Verify state and retrieve session data
-        session = verify_oauth_state(state)
-
-        # Verify the user_id matches
-        if str(user.id) != session.user_id:
-            raise HTTPException(
-                status_code=403, detail="User mismatch in OAuth callback"
-            )
+        session = verify_oauth_state(state, expected_user_id=str(user.id))
 
         # Extract oauth_config_id from session (stored during initiate)
         oauth_config_id = session.federated_connector_id
@@ -236,6 +231,12 @@ def handle_oauth_callback(
             redirect_url=return_path,
         )
 
+    except OAuthStateUserMismatchError as e:
+        logger.warning(f"OAuth callback rejected for user_id={user.id}: {e}")
+        return OAuthCallbackResponse(
+            redirect_url="/chat",
+            error="User mismatch in OAuth callback",
+        )
     except ValueError as e:
         logger.error(f"OAuth callback error: {e}")
         return OAuthCallbackResponse(

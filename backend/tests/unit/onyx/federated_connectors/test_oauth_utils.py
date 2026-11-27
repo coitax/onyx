@@ -14,6 +14,7 @@ from onyx.cache.interface import CacheLock
 from onyx.federated_connectors.oauth_utils import generate_oauth_state
 from onyx.federated_connectors.oauth_utils import OAUTH_STATE_TTL
 from onyx.federated_connectors.oauth_utils import OAuthSession
+from onyx.federated_connectors.oauth_utils import OAuthStateUserMismatchError
 from onyx.federated_connectors.oauth_utils import verify_oauth_state
 
 
@@ -76,7 +77,7 @@ class TestGenerateAndVerifyRoundTrip:
                 federated_connector_id=42,
                 user_id="user-abc",
             )
-            session = verify_oauth_state(state)
+            session = verify_oauth_state(state, expected_user_id="user-abc")
 
         assert session.federated_connector_id == 42
         assert session.user_id == "user-abc"
@@ -92,7 +93,7 @@ class TestGenerateAndVerifyRoundTrip:
                 redirect_uri="https://example.com/callback",
                 additional_data={"scope": "read"},
             )
-            session = verify_oauth_state(state)
+            session = verify_oauth_state(state, expected_user_id="user-xyz")
 
         assert session.federated_connector_id == 7
         assert session.user_id == "user-xyz"
@@ -105,10 +106,24 @@ class TestOneTimeUse:
         cache = _MemoryCacheBackend()
         with _patched(cache):
             state = generate_oauth_state(federated_connector_id=1, user_id="u")
-            verify_oauth_state(state)
+            verify_oauth_state(state, expected_user_id="u")
 
             with pytest.raises(ValueError, match="OAuth state not found"):
-                verify_oauth_state(state)
+                verify_oauth_state(state, expected_user_id="u")
+
+
+class TestUserBinding:
+    def test_other_user_is_rejected_without_consuming_state(self) -> None:
+        cache = _MemoryCacheBackend()
+        with _patched(cache):
+            state = generate_oauth_state(federated_connector_id=1, user_id="owner")
+
+            with pytest.raises(OAuthStateUserMismatchError):
+                verify_oauth_state(state, expected_user_id="someone-else")
+
+            session = verify_oauth_state(state, expected_user_id="owner")
+
+        assert session.user_id == "owner"
 
 
 class TestTTLPropagation:
@@ -137,7 +152,7 @@ class TestVerifyInvalidState:
             cache._store.clear()
 
             with pytest.raises(ValueError, match="OAuth state not found"):
-                verify_oauth_state(state)
+                verify_oauth_state(state, expected_user_id="u")
 
 
 class TestOAuthSessionSerialization:
