@@ -58,7 +58,7 @@ async def test_concurrent_embeddings() -> None:
 
     test_req = EmbedRequest(
         texts=["test"],
-        model_name="'nomic-ai/nomic-embed-text-v1'",
+        model_name="nomic-ai/nomic-embed-text-v1",
         deployment_name=None,
         max_context_length=512,
         normalize_embeddings=True,

@@ -9,6 +9,8 @@ from fastapi import Request
 
 from model_server.utils import simple_log_function_time
 from onyx.utils.logger import setup_logger
+from shared_configs.configs import is_local_embedding_model_allowed
+from shared_configs.configs import TRUST_REMOTE_CODE_EMBEDDING_MODELS
 from shared_configs.enums import EmbedTextType
 from shared_configs.model_server_models import Embedding
 from shared_configs.model_server_models import EmbedRequest
@@ -23,6 +25,14 @@ router = APIRouter(prefix="/encoder")
 
 
 _GLOBAL_MODELS_DICT: dict[str, "SentenceTransformer"] = {}
+
+
+class UntrustedEmbeddingModelError(ValueError):
+    def __init__(self, model_name: str | None) -> None:
+        super().__init__(
+            f"Embedding model '{model_name}' is not allowed on this model server. "
+            "Add it to ALLOWED_LOCAL_EMBEDDING_MODELS to allow it."
+        )
 
 
 def get_embedding_model(
@@ -58,11 +68,14 @@ def get_embedding_model(
 
     global _GLOBAL_MODELS_DICT
 
+    if not is_local_embedding_model_allowed(model_name):
+        raise UntrustedEmbeddingModelError(model_name)
+
     if model_name not in _GLOBAL_MODELS_DICT:
         logger.notice(f"Loading {model_name}")
         model = SentenceTransformer(
             model_name_or_path=model_name,
-            trust_remote_code=True,
+            trust_remote_code=model_name in TRUST_REMOTE_CODE_EMBEDDING_MODELS,
         )
         model.max_seq_length = max_context_length
         _prewarm_rope(model, max_context_length)
@@ -192,6 +205,12 @@ async def process_embed_request(
 
     if not all(embed_request.texts):
         raise ValueError("Empty strings are not allowed for embedding.")
+
+    if not is_local_embedding_model_allowed(embed_request.model_name):
+        raise HTTPException(
+            status_code=400,
+            detail=str(UntrustedEmbeddingModelError(embed_request.model_name)),
+        )
 
     try:
         if embed_request.text_type == EmbedTextType.QUERY:
