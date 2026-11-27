@@ -23,6 +23,7 @@ from onyx.configs.constants import DEFAULT_PERSONA_ID
 from onyx.configs.constants import NotificationType
 from onyx.db.constants import SLACK_BOT_PERSONA_PREFIX
 from onyx.db.document_access import get_accessible_documents_by_ids
+from onyx.db.file_record import get_filerecord_by_file_id_optional
 from onyx.db.models import ConnectorCredentialPair
 from onyx.db.models import Document
 from onyx.db.models import DocumentSet
@@ -49,6 +50,10 @@ from onyx.utils.logger import setup_logger
 from onyx.utils.variable_functionality import fetch_versioned_implementation
 
 logger = setup_logger()
+
+# FileRecord.file_metadata key holding the id of the user who uploaded a
+# persona profile image.
+PERSONA_IMAGE_UPLOADER_METADATA_KEY = "uploader_user_id"
 
 
 def get_default_behavior_persona(
@@ -1001,6 +1006,39 @@ def upsert_persona(
         )
         if not user_files and user_file_ids:
             raise ValueError("user_files not found")
+        # Linking a file to a persona grants every persona viewer access to it,
+        # so a user may only link files they own or that are already linked.
+        if user is not None:
+            already_linked_ids = (
+                {uf.id for uf in existing_persona.user_files}
+                if existing_persona
+                else set()
+            )
+            for user_file in user_files:
+                if (
+                    user_file.user_id != user.id
+                    and user_file.id not in already_linked_ids
+                ):
+                    raise ValueError("user_files not found")
+
+    # The profile image is served to every persona viewer, so a newly set
+    # image must be one this user uploaded through the persona image endpoint.
+    if (
+        user is not None
+        and uploaded_image_id
+        and (
+            existing_persona is None
+            or uploaded_image_id != existing_persona.uploaded_image_id
+        )
+    ):
+        image_record = get_filerecord_by_file_id_optional(
+            file_id=uploaded_image_id, db_session=db_session
+        )
+        image_metadata = image_record.file_metadata if image_record else None
+        if not isinstance(image_metadata, dict) or image_metadata.get(
+            PERSONA_IMAGE_UPLOADER_METADATA_KEY
+        ) != str(user.id):
+            raise ValueError("uploaded_image_id not found")
 
     labels = None
     if label_ids is not None:
