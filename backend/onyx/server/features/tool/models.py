@@ -2,8 +2,30 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from onyx.configs.constants import MASK_CREDENTIAL_CHAR
 from onyx.db.models import Tool
 from onyx.server.features.tool.tool_visibility import get_tool_visibility_config
+from onyx.utils.headers import HeaderItemDict
+
+# Returned in place of every stored header value. Sending it back on update
+# keeps the stored value for that header key.
+MASKED_HEADER_VALUE = MASK_CREDENTIAL_CHAR * 12
+
+
+class Header(BaseModel):
+    key: str
+    value: str
+
+
+def mask_custom_headers(
+    custom_headers: list[HeaderItemDict] | None,
+) -> list[Header] | None:
+    if custom_headers is None:
+        return None
+    return [
+        Header(key=header["key"], value=MASKED_HEADER_VALUE)
+        for header in custom_headers
+    ]
 
 
 class ToolSnapshot(BaseModel):
@@ -13,7 +35,7 @@ class ToolSnapshot(BaseModel):
     definition: dict[str, Any] | None
     display_name: str
     in_code_tool_id: str | None
-    custom_headers: list[Any] | None
+    custom_headers: list[Header] | None
     passthrough_auth: bool
     mcp_server_id: int | None = None
     user_id: str | None = None
@@ -38,7 +60,7 @@ class ToolSnapshot(BaseModel):
             definition=tool.openapi_schema,
             display_name=tool.display_name or tool.name,
             in_code_tool_id=tool.in_code_tool_id,
-            custom_headers=tool.custom_headers,
+            custom_headers=mask_custom_headers(tool.custom_headers),
             passthrough_auth=tool.passthrough_auth,
             mcp_server_id=tool.mcp_server_id,
             user_id=str(tool.user_id) if tool.user_id else None,
@@ -52,11 +74,6 @@ class ToolSnapshot(BaseModel):
             ),
             default_enabled=config.default_enabled if config else False,
         )
-
-
-class Header(BaseModel):
-    key: str
-    value: str
 
 
 class CustomToolCreate(BaseModel):

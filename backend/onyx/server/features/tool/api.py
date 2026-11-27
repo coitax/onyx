@@ -20,8 +20,12 @@ from onyx.db.tools import get_tool_by_id
 from onyx.db.tools import get_tools
 from onyx.db.tools import get_tools_by_ids
 from onyx.db.tools import update_tool
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.server.features.tool.models import CustomToolCreate
 from onyx.server.features.tool.models import CustomToolUpdate
+from onyx.server.features.tool.models import Header
+from onyx.server.features.tool.models import MASKED_HEADER_VALUE
 from onyx.server.features.tool.models import ToolSnapshot
 from onyx.server.features.tool.tool_visibility import should_expose_tool_to_fe
 from onyx.tools.built_in_tools import get_built_in_tool_by_id
@@ -32,6 +36,7 @@ from onyx.tools.tool_implementations.custom.openapi_parsing import (
 from onyx.tools.tool_implementations.custom.openapi_parsing import (
     validate_openapi_schema,
 )
+from onyx.utils.headers import HeaderItemDict
 
 router = APIRouter(prefix="/tool")
 admin_router = APIRouter(prefix="/admin/tool")
@@ -52,6 +57,35 @@ def _validate_auth_settings(tool_data: CustomToolCreate | CustomToolUpdate) -> N
                     status_code=400,
                     detail="Cannot use passthrough auth with custom authorization headers",
                 )
+
+
+def _restore_masked_header_values(
+    custom_headers: list[Header] | None,
+    existing_headers: list[HeaderItemDict] | None,
+) -> list[Header] | None:
+    """Swap masked placeholder values back to the stored value for the same key.
+
+    Only headers already stored on the tool being edited can be restored, so a
+    placeholder can never pull a value from anywhere else.
+    """
+    if custom_headers is None:
+        return None
+
+    existing_values = {
+        header["key"]: header["value"] for header in existing_headers or []
+    }
+    restored: list[Header] = []
+    for header in custom_headers:
+        if header.value != MASKED_HEADER_VALUE:
+            restored.append(header)
+            continue
+        if header.key not in existing_values:
+            raise OnyxError(
+                OnyxErrorCode.INVALID_INPUT,
+                f"Header '{header.key}' has no stored value. Please provide the actual header value.",
+            )
+        restored.append(Header(key=header.key, value=existing_values[header.key]))
+    return restored
 
 
 def _get_editable_custom_tool(tool_id: int, db_session: Session, user: User) -> Tool:
@@ -88,11 +122,12 @@ def create_custom_tool(
 ) -> ToolSnapshot:
     _validate_tool_definition(tool_data.definition)
     _validate_auth_settings(tool_data)
+    custom_headers = _restore_masked_header_values(tool_data.custom_headers, None)
     tool = create_tool__no_commit(
         name=tool_data.name,
         description=tool_data.description,
         openapi_schema=tool_data.definition,
-        custom_headers=tool_data.custom_headers,
+        custom_headers=custom_headers,
         user_id=user.id,
         db_session=db_session,
         passthrough_auth=tool_data.passthrough_auth,
@@ -114,12 +149,15 @@ def update_custom_tool(
     if tool_data.definition:
         _validate_tool_definition(tool_data.definition)
     _validate_auth_settings(tool_data)
+    custom_headers = _restore_masked_header_values(
+        tool_data.custom_headers, existing_tool.custom_headers
+    )
     updated_tool = update_tool(
         tool_id=tool_id,
         name=tool_data.name,
         description=tool_data.description,
         openapi_schema=tool_data.definition,
-        custom_headers=tool_data.custom_headers,
+        custom_headers=custom_headers,
         user_id=existing_tool.user_id,
         db_session=db_session,
         passthrough_auth=tool_data.passthrough_auth,
