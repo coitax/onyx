@@ -324,18 +324,22 @@ def verify_user_files(
 
     # Extract user_file_ids and project file_ids from the file descriptors
     user_file_ids = []
+    descriptor_ids_by_user_file_id: dict[UUID, set[str]] = {}
     project_file_ids = []
 
     for file_descriptor in user_files:
         # Check if this file descriptor has a user_file_id
         if file_descriptor.get("user_file_id"):
             try:
-                user_file_ids.append(UUID(file_descriptor["user_file_id"]))
+                user_file_id = UUID(file_descriptor["user_file_id"])
             except (ValueError, TypeError):
-                logger.warning(
+                raise ValueError(
                     f"Invalid user_file_id in file descriptor: {file_descriptor['user_file_id']}"
                 )
-                continue
+            user_file_ids.append(user_file_id)
+            descriptor_ids_by_user_file_id.setdefault(user_file_id, set()).add(
+                file_descriptor.get("id") or ""
+            )
         else:
             # This is a project file - use the 'id' field which is the file_id
             if file_descriptor.get("id"):
@@ -343,7 +347,21 @@ def verify_user_files(
 
     # Verify user files (existing logic)
     if user_file_ids:
-        validate_user_files_ownership(user_file_ids, user_id, db_session)
+        owned_user_files = validate_user_files_ownership(
+            user_file_ids, user_id, db_session
+        )
+        owned_by_id = {user_file.id: user_file for user_file in owned_user_files}
+        # The descriptor `id` is stored on the message and later used to serve
+        # the file, so it must name the verified user file and nothing else.
+        for user_file_id, descriptor_ids in descriptor_ids_by_user_file_id.items():
+            owned_file = owned_by_id.get(user_file_id)
+            if owned_file is None:
+                raise ValueError(f"User file {user_file_id} not found")
+            allowed_ids = {owned_file.file_id, str(owned_file.id)}
+            if not descriptor_ids <= allowed_ids:
+                raise ValueError(
+                    f"File descriptor does not match user file {user_file_id}"
+                )
 
     # Verify project files
     if project_file_ids:
