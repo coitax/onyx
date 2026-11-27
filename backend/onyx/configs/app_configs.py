@@ -222,10 +222,21 @@ JWT_PUBLIC_KEY_URL: str | None = os.getenv("JWT_PUBLIC_KEY_URL", None)
 
 USER_AUTH_SECRET = os.environ.get("USER_AUTH_SECRET", "")
 
-if AUTH_TYPE == AuthType.BASIC and not USER_AUTH_SECRET:
-    logger.warning(
-        "USER_AUTH_SECRET is not set. This is required for secure password reset "
-        "and email verification tokens. Please set USER_AUTH_SECRET in production."
+# RFC 7518 section 3.2: an HS256 key must be at least as long as the hash output.
+USER_AUTH_SECRET_MIN_LENGTH = 32
+
+
+def is_strong_user_auth_secret(secret: str) -> bool:
+    return len(secret.encode("utf-8")) >= USER_AUTH_SECRET_MIN_LENGTH
+
+
+if AUTH_TYPE in (AuthType.BASIC, AuthType.CLOUD) and not is_strong_user_auth_secret(
+    USER_AUTH_SECRET
+):
+    logger.error(
+        f"USER_AUTH_SECRET is unset or shorter than {USER_AUTH_SECRET_MIN_LENGTH} "
+        "bytes. Email verification and password reset tokens are disabled until it "
+        "is set. Generate one with: openssl rand -hex 32"
     )
 
 # Duration (in seconds) for which the FastAPI Users JWT token remains valid in the user's browser.
