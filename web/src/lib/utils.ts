@@ -86,6 +86,41 @@ export function transformLinkUri(href: string): string | null {
   }
 }
 
+/**
+ * Resolves a URL taken from stored or server-provided data (document links,
+ * citations, tool results) and returns its serialized form only if it uses an
+ * allowed protocol. Callers must open the returned string, not the input, so
+ * the value that was checked is the value that gets opened.
+ */
+export function getSafeExternalUrl(url: unknown): string | null {
+  if (typeof url !== "string" || !url) return null;
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url, window.location.href);
+  } catch {
+    return null;
+  }
+
+  if (
+    !ALLOWED_URL_PROTOCOLS.some((allowed) => allowed === parsedUrl.protocol)
+  ) {
+    return null;
+  }
+  return parsedUrl.href;
+}
+
+/**
+ * Opens a URL from stored or server-provided data in a new tab if it uses an
+ * allowed protocol. Returns whether a tab was opened.
+ */
+export function openExternalUrl(url: unknown, features?: string): boolean {
+  const safeUrl = getSafeExternalUrl(url);
+  if (!safeUrl) return false;
+  window.open(safeUrl, "_blank", features);
+  return true;
+}
+
 export function isSubset(parent: string[], child: string[]): boolean {
   const parentSet = new Set(parent);
   return Array.from(new Set(child)).every((item) => parentSet.has(item));

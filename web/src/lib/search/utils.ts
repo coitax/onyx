@@ -6,6 +6,7 @@ import {
   SourceMetadata,
 } from "./interfaces";
 import { DateRangePickerValue } from "@/components/dateRangeSelectors/AdminDateRangeSelector";
+import { openExternalUrl } from "@/lib/utils";
 
 export const buildFilters = (
   sources: SourceMetadata[],
@@ -24,15 +25,16 @@ export const buildFilters = (
   return filters;
 };
 
-// If we have a link, open it in a new tab (including if it's a file)
+// If we have a safe link, open it in a new tab (including if it's a file)
 // If above fails and we have a file, update the presenting document
 export const openDocument = (
   document: OnyxDocument,
   updatePresentingDocument?: (document: MinimalOnyxDocument) => void
 ) => {
-  if (document.link) {
-    window.open(document.link, "_blank");
-  } else if (document.source_type === ValidSources.File) {
+  if (openExternalUrl(document.link)) {
+    return;
+  }
+  if (document.source_type === ValidSources.File) {
     updatePresentingDocument?.(document);
   }
 };

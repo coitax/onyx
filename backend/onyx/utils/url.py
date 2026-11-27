@@ -1,4 +1,5 @@
 import ipaddress
+import re
 import socket
 from typing import Any
 from urllib.parse import parse_qs
@@ -387,3 +388,34 @@ def add_url_params(url: str, params: dict) -> str:
     )
 
     return new_url
+
+
+# Browsers strip C0 controls and spaces from both ends of a URL and drop
+# tab/newline anywhere in it before reading the scheme (WHATWG URL parsing), so
+# "\tjava\nscript:" is still a javascript: URL. Every other control character
+# and lone surrogate is removed too, since later steps (e.g. Postgres
+# sanitization) strip some of them and could otherwise reassemble a scheme.
+_URL_C0_CONTROL_OR_SPACE = "".join(chr(i) for i in range(0x21))
+_URL_CONTROL_OR_SURROGATE = re.compile(r"[\x00-\x1f\x7f\ud800-\udfff]")
+_URL_SCHEME = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):")
+_ALLOWED_DOCUMENT_LINK_SCHEMES = {"http", "https"}
+
+
+def sanitize_document_link(link: str | None) -> str | None:
+    """Return the link unless it could be read as having a scheme other than
+    http or https (e.g. javascript:, data:, file:), in which case return None.
+
+    Document links are opened by the UI, so script-capable schemes must never
+    be stored.
+    """
+    if not link:
+        return link
+
+    normalized = _URL_CONTROL_OR_SURROGATE.sub("", link).strip(_URL_C0_CONTROL_OR_SPACE)
+    scheme_match = _URL_SCHEME.match(normalized)
+    if (
+        scheme_match
+        and scheme_match.group(1).lower() not in _ALLOWED_DOCUMENT_LINK_SCHEMES
+    ):
+        return None
+    return link

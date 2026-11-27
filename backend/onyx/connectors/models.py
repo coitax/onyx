@@ -16,6 +16,7 @@ from onyx.configs.constants import RETURN_SEPARATOR
 from onyx.db.enums import HierarchyNodeType
 from onyx.db.enums import IndexModelStatus
 from onyx.utils.text_processing import make_url_compatible
+from onyx.utils.url import sanitize_document_link
 
 
 class InputType(str, Enum):
@@ -39,6 +40,11 @@ class Section(BaseModel):
     link: str | None = None
     text: str | None = None
     image_file_id: str | None = None
+
+    @field_validator("link")
+    @classmethod
+    def _drop_unsafe_link(cls, v: str | None) -> str | None:
+        return sanitize_document_link(v)
 
 
 class TextSection(Section):
@@ -494,6 +500,11 @@ class OnyxMetadata(BaseModel):
     secondary_owners: list[BasicExpertInfo] | None = None
     doc_updated_at: datetime | None = None
     title: str | None = None
+
+    @field_validator("link")
+    @classmethod
+    def _drop_unsafe_link(cls, v: str | None) -> str | None:
+        return sanitize_document_link(v)
 
 
 class DocExtractionContext(BaseModel):

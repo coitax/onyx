@@ -2,6 +2,7 @@ import "./globals.css";
 
 import { GTM_ENABLED, MODAL_ROOT_ID } from "@/lib/constants";
 import { Metadata } from "next";
+import { headers } from "next/headers";
 
 import AppProvider from "@/providers/AppProvider";
 import DynamicMetadata from "@/providers/DynamicMetadata";
@@ -60,11 +61,14 @@ export const metadata: Metadata = {
 // all data is fetched client-side via SWR in the provider tree.
 export const dynamic = "force-dynamic";
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // Set per request by src/proxy.ts and allowed by its Content-Security-Policy.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html
       lang="en"
@@ -81,6 +85,7 @@ export default function RootLayout({
           <Script
             id="google-tag-manager"
             strategy="afterInteractive"
+            nonce={nonce}
             dangerouslySetInnerHTML={{
               __html: `
                (function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
@@ -100,6 +105,7 @@ export default function RootLayout({
           defaultTheme="system"
           enableSystem
           disableTransitionOnChange
+          nonce={nonce}
         >
           <div className="text-text min-h-screen bg-background">
             <TooltipProvider>
@@ -108,7 +114,7 @@ export default function RootLayout({
                   <AppHealthBanner />
                   <AppProvider>
                     <DynamicMetadata />
-                    <CustomAnalyticsScript />
+                    <CustomAnalyticsScript nonce={nonce} />
                     <Suspense fallback={null}>
                       <PostHogPageView />
                     </Suspense>

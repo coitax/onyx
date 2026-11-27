@@ -17,6 +17,7 @@ import {
   getMetadataTags,
 } from "./searchStateUtils";
 import Text from "@/refresh-components/texts/Text";
+import { openExternalUrl } from "@/lib/utils";
 
 const queryToSourceInfo = (query: string, index: number): SourceInfo => ({
   id: `query-${index}`,
@@ -105,9 +106,7 @@ export const InternalSearchToolRenderer: MessageRenderer<
               }
               toSourceInfo={(doc: OnyxDocument) => resultToSourceInfo(doc)}
               onClick={(doc: OnyxDocument) => {
-                if (doc.link) {
-                  window.open(doc.link, "_blank", "noopener,noreferrer");
-                }
+                openExternalUrl(doc.link, "noopener,noreferrer");
               }}
               emptyState={
                 !isComplete ? (
@@ -168,9 +167,7 @@ export const InternalSearchToolRenderer: MessageRenderer<
             }
             toSourceInfo={(doc: OnyxDocument) => resultToSourceInfo(doc)}
             onClick={(doc: OnyxDocument) => {
-              if (doc.link) {
-                window.open(doc.link, "_blank", "noopener,noreferrer");
-              }
+              openExternalUrl(doc.link, "noopener,noreferrer");
             }}
             emptyState={
               !isComplete ? (
@@ -225,9 +222,7 @@ export const InternalSearchToolRenderer: MessageRenderer<
                 }
                 toSourceInfo={(doc: OnyxDocument) => resultToSourceInfo(doc)}
                 onClick={(doc: OnyxDocument) => {
-                  if (doc.link) {
-                    window.open(doc.link, "_blank", "noopener,noreferrer");
-                  }
+                  openExternalUrl(doc.link, "noopener,noreferrer");
                 }}
                 emptyState={
                   !isComplete ? (

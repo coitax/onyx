@@ -14,6 +14,7 @@ import {
   URLS_PER_EXPANSION,
 } from "./fetchStateUtils";
 import Text from "@/refresh-components/texts/Text";
+import { openExternalUrl } from "@/lib/utils";
 import { SvgCircle } from "@opal/icons";
 
 const urlToSourceInfo = (url: string, index: number): SourceInfo => ({
@@ -95,7 +96,7 @@ export const FetchToolRenderer: MessageRenderer<FetchToolPacket, {}> = ({
                 getKey={(doc: OnyxDocument) => doc.document_id}
                 toSourceInfo={(doc: OnyxDocument) => documentToSourceInfo(doc)}
                 onClick={(doc: OnyxDocument) => {
-                  if (doc.link) window.open(doc.link, "_blank");
+                  openExternalUrl(doc.link);
                 }}
                 emptyState={!stopPacketSeen ? <BlinkingBar /> : undefined}
               />
@@ -106,7 +107,7 @@ export const FetchToolRenderer: MessageRenderer<FetchToolPacket, {}> = ({
                 expansionCount={URLS_PER_EXPANSION}
                 getKey={(url: string) => url}
                 toSourceInfo={urlToSourceInfo}
-                onClick={(url: string) => window.open(url, "_blank")}
+                onClick={(url: string) => openExternalUrl(url)}
                 emptyState={!stopPacketSeen ? <BlinkingBar /> : undefined}
               />
             ) : (
@@ -134,7 +135,7 @@ export const FetchToolRenderer: MessageRenderer<FetchToolPacket, {}> = ({
               getKey={(doc: OnyxDocument) => doc.document_id}
               toSourceInfo={(doc: OnyxDocument) => documentToSourceInfo(doc)}
               onClick={(doc: OnyxDocument) => {
-                if (doc.link) window.open(doc.link, "_blank");
+                openExternalUrl(doc.link);
               }}
               emptyState={!stopPacketSeen ? <BlinkingBar /> : undefined}
             />
@@ -145,7 +146,7 @@ export const FetchToolRenderer: MessageRenderer<FetchToolPacket, {}> = ({
               expansionCount={URLS_PER_EXPANSION}
               getKey={(url: string) => url}
               toSourceInfo={urlToSourceInfo}
-              onClick={(url: string) => window.open(url, "_blank")}
+              onClick={(url: string) => openExternalUrl(url)}
               emptyState={!stopPacketSeen ? <BlinkingBar /> : undefined}
             />
           ) : (

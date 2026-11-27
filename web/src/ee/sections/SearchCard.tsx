@@ -13,6 +13,7 @@ import { Interactive } from "@opal/core";
 import Truncated from "@/refresh-components/texts/Truncated";
 import { timeAgo } from "@/lib/time";
 import { useMemo } from "react";
+import { openExternalUrl } from "@/lib/utils";
 
 export interface SearchResultCardProps {
   /** The search result document to display */
@@ -37,8 +38,7 @@ export default function SearchCard({
     document.is_internet || document.source_type === ValidSources.Web;
 
   function handleClick() {
-    if (document.link) {
-      window.open(document.link, "_blank", "noopener,noreferrer");
+    if (openExternalUrl(document.link, "noopener,noreferrer")) {
       return;
     }
     onDocumentClick({
