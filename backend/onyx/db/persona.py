@@ -14,6 +14,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from onyx.access.hierarchy_access import get_user_external_group_ids
 from onyx.auth.schemas import UserRole
@@ -145,6 +146,18 @@ def _add_user_filters(
     where_clause |= Persona.user_id == user.id
 
     return stmt.where(where_clause)
+
+
+def user_can_view_persona_matching(
+    db_session: Session,
+    user: User,
+    *criteria: ColumnElement[bool],
+) -> bool:
+    """Whether at least one non-deleted persona matching `criteria` is visible
+    to `user` under the same rules used for listing personas."""
+    stmt = select(Persona).where(Persona.deleted.is_(False), *criteria)
+    stmt = _add_user_filters(stmt=stmt, user=user, get_editable=False)
+    return db_session.scalars(stmt.limit(1)).first() is not None
 
 
 def fetch_persona_by_id_for_user(

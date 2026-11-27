@@ -50,6 +50,7 @@ from onyx.db.chat import set_as_latest_chat_message
 from onyx.db.chat import set_preferred_response
 from onyx.db.chat import translate_db_message_to_chat_message_detail
 from onyx.db.chat import update_chat_session
+from onyx.db.chat_file_access import user_can_access_chat_file
 from onyx.db.chat_search import search_chat_sessions
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
@@ -866,19 +867,30 @@ def seed_chat_from_slack(
 def fetch_chat_file(
     file_id: str,
     request: Request,
-    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> Response:
 
-    # For user files, we need to get the file id from the user file id
+    # For user files, we need to get the file id from the user file id.
+    # The resolved id is authorized and served as-is; it is never re-resolved.
+    user_file_id: UUID | None = None
     file_id_from_user_file = get_file_id_by_user_file_id(file_id, db_session)
     if file_id_from_user_file:
+        user_file_id = UUID(file_id)
         file_id = file_id_from_user_file
+
+    if not user_can_access_chat_file(
+        file_id=file_id,
+        user_file_id=user_file_id,
+        user=user,
+        db_session=db_session,
+    ):
+        raise OnyxError(OnyxErrorCode.NOT_FOUND, "File not found")
 
     file_store = get_default_file_store()
     file_record = file_store.read_file_record(file_id)
     if not file_record:
-        raise HTTPException(status_code=404, detail="File not found")
+        raise OnyxError(OnyxErrorCode.NOT_FOUND, "File not found")
 
     media_type = file_record.file_type
     file_io = file_store.read_file(file_id, mode="b")
