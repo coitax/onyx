@@ -1,4 +1,6 @@
 import contextlib
+import hashlib
+import struct
 import time
 from collections.abc import Generator
 from collections.abc import Iterable
@@ -29,7 +31,9 @@ from onyx.configs.constants import DocumentSource
 from onyx.configs.kg_configs import KG_SIMPLE_ANSWER_MAX_DISPLAYED_SOURCES
 from onyx.db.chunk import delete_chunk_stats_by_connector_credential_pair__no_commit
 from onyx.db.connector_credential_pair import get_connector_credential_pair_from_id
+from onyx.db.connector_credential_pair import select_editable_cc_pair_keys_for_user
 from onyx.db.document_access import apply_document_access_filter
+from onyx.db.engine.sql_engine import get_session_with_tenant
 from onyx.db.entities import delete_from_kg_entities__no_commit
 from onyx.db.entities import delete_from_kg_entities_extraction_staging__no_commit
 from onyx.db.enums import AccessType
@@ -43,6 +47,7 @@ from onyx.db.models import DocumentByConnectorCredentialPair
 from onyx.db.models import KGEntity
 from onyx.db.models import KGRelationship
 from onyx.db.models import User
+from onyx.db.models import UserRole
 from onyx.db.relationships import delete_from_kg_relationships__no_commit
 from onyx.db.relationships import (
     delete_from_kg_relationships_extraction_staging__no_commit,
@@ -55,10 +60,13 @@ from onyx.document_index.interfaces import DocumentMetadata
 from onyx.kg.models import KGStage
 from onyx.server.documents.models import ConnectorCredentialPairIdentifier
 from onyx.utils.logger import setup_logger
+from shared_configs.contextvars import get_current_tenant_id
 
 logger = setup_logger()
 
 ONE_HOUR_IN_SECONDS = 60 * 60
+
+_INGESTION_DOCUMENT_LOCK_NAMESPACE = "onyx_ingestion_document_lock"
 
 
 def check_docs_exist(db_session: Session) -> bool:
@@ -1097,11 +1105,75 @@ def prepare_to_modify_documents(
 
 def get_ingestion_documents(
     db_session: Session,
+    user: User,
 ) -> list[DbDocument]:
+    """Ingestion API documents attached to at least one cc_pair the user can edit."""
     # TODO add the option to filter by DocumentSource
     stmt = select(DbDocument).where(DbDocument.from_ingestion_api.is_(True))
+    if user.role != UserRole.ADMIN:
+        stmt = stmt.where(
+            exists().where(
+                DocumentByConnectorCredentialPair.id == DbDocument.id,
+                tuple_(
+                    DocumentByConnectorCredentialPair.connector_id,
+                    DocumentByConnectorCredentialPair.credential_id,
+                ).in_(select_editable_cc_pair_keys_for_user(user)),
+            )
+        )
     documents = db_session.execute(stmt).scalars().all()
     return list(documents)
+
+
+def user_can_edit_existing_documents(
+    db_session: Session,
+    document_ids: list[str],
+    user: User,
+) -> bool:
+    """False if any of the given documents exists and is either attached to no
+    cc_pair or attached to a cc_pair the user cannot edit."""
+    unattached = select(DbDocument.id).where(
+        DbDocument.id.in_(document_ids),
+        ~exists().where(DocumentByConnectorCredentialPair.id == DbDocument.id),
+    )
+    attached_elsewhere = select(DocumentByConnectorCredentialPair.id).where(
+        DocumentByConnectorCredentialPair.id.in_(document_ids),
+        tuple_(
+            DocumentByConnectorCredentialPair.connector_id,
+            DocumentByConnectorCredentialPair.credential_id,
+        ).not_in(select_editable_cc_pair_keys_for_user(user)),
+    )
+    stmt = select(~(exists(unattached) | exists(attached_elsewhere)))
+    return bool(db_session.execute(stmt).scalar())
+
+
+def _ingestion_document_lock_id(tenant_id: str, lock_key: str) -> int:
+    digest = hashlib.sha256(
+        f"{_INGESTION_DOCUMENT_LOCK_NAMESPACE}:{tenant_id}:{lock_key}".encode()
+    ).digest()
+    return struct.unpack("q", digest[:8])[0]
+
+
+@contextlib.contextmanager
+def ingestion_document_lock(lock_key: str) -> Generator[None, None, None]:
+    """Serializes ingestion API writes and deletes that share a lock key.
+
+    The lock lives on its own connection because the indexing pipeline commits
+    the caller's session several times, which would release a transaction-level
+    lock taken there before the document and its cc_pair link are written.
+    """
+    tenant_id = get_current_tenant_id()
+    with get_session_with_tenant(tenant_id=tenant_id) as lock_session:
+        try:
+            lock_session.execute(
+                select(
+                    func.pg_advisory_xact_lock(
+                        _ingestion_document_lock_id(tenant_id, lock_key)
+                    )
+                )
+            )
+            yield
+        finally:
+            lock_session.rollback()
 
 
 def get_documents_by_cc_pair(

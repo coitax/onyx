@@ -294,6 +294,14 @@ def verify_user_has_access_to_cc_pair(
     return result.scalars().first() is not None
 
 
+def select_editable_cc_pair_keys_for_user(user: User) -> Select[tuple[int, int]]:
+    """(connector_id, credential_id) of every cc_pair the user is allowed to edit."""
+    stmt = select(
+        ConnectorCredentialPair.connector_id, ConnectorCredentialPair.credential_id
+    )
+    return _add_user_filters(stmt, user, get_editable=True)
+
+
 def get_connector_credential_pair_from_id(
     db_session: Session,
     cc_pair_id: int,
