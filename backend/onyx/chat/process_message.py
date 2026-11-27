@@ -28,6 +28,7 @@ from onyx.chat.chat_utils import convert_chat_history
 from onyx.chat.chat_utils import create_chat_history_chain
 from onyx.chat.chat_utils import create_chat_session_from_request
 from onyx.chat.chat_utils import get_custom_agent_prompt
+from onyx.chat.chat_utils import get_persona_for_chat_or_raise
 from onyx.chat.chat_utils import is_last_assistant_message_clarification
 from onyx.chat.chat_utils import load_all_chat_files
 from onyx.chat.compression import calculate_total_history_tokens
@@ -493,6 +494,9 @@ def build_chat_turn(
     custom_tool_additional_headers: dict[str, str] | None = None,
     mcp_headers: dict[str, str] | None = None,
     bypass_acl: bool = False,
+    # Only for server-side flows where an admin bound the persona (Slack channel
+    # configs). Never set from request data.
+    bypass_persona_access_check: bool = False,
     # Slack context for federated Slack search
     slack_context: SlackContext | None = None,
     # Additional context to include in the chat history, e.g. Slack threads where the
@@ -529,8 +533,9 @@ def build_chat_turn(
             raise RuntimeError("Must specify a chat session id or chat session info")
         chat_session = create_chat_session_from_request(
             chat_session_request=new_msg_req.chat_session_info,
-            user_id=user_id,
+            user=user,
             db_session=db_session,
+            bypass_persona_access_check=bypass_persona_access_check,
         )
         yield CreateChatSessionID(chat_session_id=chat_session.id)
         chat_session = get_chat_session_by_id(
@@ -547,7 +552,14 @@ def build_chat_turn(
             eager_load_persona=True,
         )
 
-    persona = chat_session.persona
+    # Re-checked on every turn: the session may predate the check, or the
+    # user may have lost access to (or the owner deleted) the persona since.
+    persona = get_persona_for_chat_or_raise(
+        db_session=db_session,
+        persona_id=chat_session.persona_id,
+        user=user,
+        bypass_user_access_check=bypass_persona_access_check,
+    )
     message_text = new_msg_req.message
 
     user_identity = LLMUserIdentity(
@@ -1283,6 +1295,7 @@ def _stream_chat_turn(
     custom_tool_additional_headers: dict[str, str] | None = None,
     mcp_headers: dict[str, str] | None = None,
     bypass_acl: bool = False,
+    bypass_persona_access_check: bool = False,
     additional_context: str | None = None,
     slack_context: SlackContext | None = None,
     external_state_container: ChatStateContainer | None = None,
@@ -1308,6 +1321,9 @@ def _stream_chat_turn(
         custom_tool_additional_headers: Extra headers for custom tool HTTP calls.
         mcp_headers: Extra headers for MCP tool calls.
         bypass_acl: If ``True``, document ACL checks are skipped (used by Slack bot).
+        bypass_persona_access_check: If ``True``, the user's access to the session's
+            persona is not checked (deleted personas are still rejected). Only for
+            server-side flows where an admin bound the persona (Slack channel configs).
         additional_context: Extra context prepended to the LLM's chat history, not
             stored in the DB (used for Slack thread hydration).
         slack_context: Federated Slack search context passed through to the search tool.
@@ -1337,6 +1353,7 @@ def _stream_chat_turn(
             custom_tool_additional_headers=custom_tool_additional_headers,
             mcp_headers=mcp_headers,
             bypass_acl=bypass_acl,
+            bypass_persona_access_check=bypass_persona_access_check,
             slack_context=slack_context,
             additional_context=additional_context,
         )
@@ -1449,6 +1466,7 @@ def handle_stream_message_objects(
     custom_tool_additional_headers: dict[str, str] | None = None,
     mcp_headers: dict[str, str] | None = None,
     bypass_acl: bool = False,
+    bypass_persona_access_check: bool = False,
     additional_context: str | None = None,
     slack_context: SlackContext | None = None,
     external_state_container: ChatStateContainer | None = None,
@@ -1463,6 +1481,7 @@ def handle_stream_message_objects(
         custom_tool_additional_headers=custom_tool_additional_headers,
         mcp_headers=mcp_headers,
         bypass_acl=bypass_acl,
+        bypass_persona_access_check=bypass_persona_access_check,
         additional_context=additional_context,
         slack_context=slack_context,
         external_state_container=external_state_container,

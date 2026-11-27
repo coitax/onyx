@@ -25,8 +25,12 @@ from onyx.db.models import ChatMessage
 from onyx.db.models import ChatSession
 from onyx.db.models import Persona
 from onyx.db.models import SearchDoc as DbSearchDoc
+from onyx.db.models import User
 from onyx.db.models import UserFile
+from onyx.db.persona import fetch_persona_for_chat
 from onyx.db.projects import check_project_ownership
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import ChatFileType
@@ -106,37 +110,70 @@ def build_file_context(
     return FileContextResult(message=message, tool_metadata=metadata)
 
 
+def get_persona_for_chat_or_raise(
+    db_session: Session,
+    persona_id: int | None,
+    user: User,
+    bypass_user_access_check: bool = False,
+) -> Persona:
+    persona = fetch_persona_for_chat(
+        db_session=db_session,
+        persona_id=persona_id,
+        user=user,
+        bypass_user_access_check=bypass_user_access_check,
+    )
+    if persona is None:
+        raise OnyxError(
+            OnyxErrorCode.PERSONA_NOT_FOUND,
+            f"Persona with ID {persona_id} does not exist or user does not have access to it",
+        )
+    return persona
+
+
 def create_chat_session_from_request(
     chat_session_request: ChatSessionCreationRequest,
-    user_id: UUID | None,
+    user: User,
     db_session: Session,
+    bypass_persona_access_check: bool = False,
 ) -> ChatSession:
     """Create a chat session from a ChatSessionCreationRequest.
 
-    Includes project ownership validation when project_id is provided.
+    Validates project ownership when project_id is provided and that the user
+    may chat with the requested persona.
 
     Args:
         chat_session_request: The request containing persona_id, description, and project_id
-        user_id: The ID of the user creating the session (can be None for anonymous)
+        user: The user creating the session (may be anonymous)
         db_session: The database session
+        bypass_persona_access_check: Only for server-side flows where an admin
+            bound the persona (e.g. a Slack channel config)
 
     Returns:
         The newly created ChatSession
 
     Raises:
         ValueError: If user lacks access to the specified project
-        Exception: If the persona is invalid
+        OnyxError: If the persona does not exist, is deleted, or is not
+            accessible to the user
     """
+    user_id = user.id
     project_id = chat_session_request.project_id
     if project_id:
         if not check_project_ownership(project_id, user_id, db_session):
             raise ValueError("User does not have access to project")
 
+    persona = get_persona_for_chat_or_raise(
+        db_session=db_session,
+        persona_id=chat_session_request.persona_id,
+        user=user,
+        bypass_user_access_check=bypass_persona_access_check,
+    )
+
     return create_chat_session(
         db_session=db_session,
         description=chat_session_request.description or "",
         user_id=user_id,
-        persona_id=chat_session_request.persona_id,
+        persona_id=persona.id,
         project_id=chat_session_request.project_id,
     )
 

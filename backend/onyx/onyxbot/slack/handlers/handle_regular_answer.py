@@ -252,6 +252,9 @@ def handle_regular_answer(
                 user=onyx_user,
                 db_session=db_session,
                 bypass_acl=False,
+                # The persona comes from the admin-managed Slack channel config,
+                # not from the Slack user.
+                bypass_persona_access_check=True,
                 additional_context=slack_context_str,
                 slack_context=message_info.slack_context,
             )
