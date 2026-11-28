@@ -23,6 +23,30 @@ function isLegacyDoc(fileName: string): boolean {
   return lower.endsWith(".doc") && !lower.endsWith(".docx");
 }
 
+// docx-preview renders into the live page, so anything it emits runs with the
+// Onyx origin. These elements can execute or embed document-supplied content.
+const UNSAFE_RENDERED_ELEMENTS = "iframe, frame, object, embed, script";
+const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+function hasSafeLinkTarget(href: string): boolean {
+  if (href.startsWith("#")) return true;
+  try {
+    return SAFE_LINK_PROTOCOLS.has(new URL(href).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeRenderedDocx(root: HTMLElement): void {
+  root.querySelectorAll(UNSAFE_RENDERED_ELEMENTS).forEach((el) => el.remove());
+  root.querySelectorAll("a[href]").forEach((anchor) => {
+    const href = anchor.getAttribute("href") ?? "";
+    if (!hasSafeLinkTarget(href)) {
+      anchor.removeAttribute("href");
+    }
+  });
+}
+
 interface DocxLoadResult {
   plainText: string;
   wordCount: number;
@@ -69,7 +93,11 @@ function DocxPreview({ fileUrl, onLoad }: DocxPreviewProps) {
             renderFooters: true,
             renderFootnotes: true,
             renderEndnotes: true,
+            // altChunk parts are arbitrary HTML that docx-preview places in an
+            // unsandboxed srcdoc iframe, which would run script as Onyx.
+            renderAltChunks: false,
           });
+          sanitizeRenderedDocx(bodyRef.current);
         }
 
         // Extract plain text from the rendered DOM
