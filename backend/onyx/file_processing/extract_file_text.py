@@ -255,10 +255,18 @@ def read_pdf_file(
 
         if extract_images:
             for page_num, page in enumerate(pdf_reader.pages):
-                for image_file_object in page.images:
-                    image = Image.open(io.BytesIO(image_file_object.data))
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format=image.format)
+                page_images = page.images
+                for image_key in page_images.keys():
+                    try:
+                        image_file_object = page_images[image_key]
+                        image = Image.open(io.BytesIO(image_file_object.data))
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format=image.format)
+                    except Exception:
+                        logger.warning(
+                            f"Skipping undecodable image {image_key} on PDF page {page_num + 1}"
+                        )
+                        continue
                     img_bytes = img_byte_arr.getvalue()
 
                     image_format = image.format.lower() if image.format else "png"
