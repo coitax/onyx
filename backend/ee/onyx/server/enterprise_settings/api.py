@@ -1,18 +1,18 @@
 from datetime import datetime
 from datetime import timezone
-from typing import Any
 
-import httpx
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Response
-from fastapi import status
 from fastapi import UploadFile
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import model_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from ee.onyx.db.oauth_account import refresh_linked_oauth_account
 from ee.onyx.db.scim import ScimDAL
 from ee.onyx.server.enterprise_settings.models import AnalyticsScriptUpload
 from ee.onyx.server.enterprise_settings.models import EnterpriseSettings
@@ -29,8 +29,8 @@ from ee.onyx.server.scim.models import ScimTokenCreatedResponse
 from ee.onyx.server.scim.models import ScimTokenResponse
 from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_user_with_expired_token
-from onyx.auth.users import get_user_manager
-from onyx.auth.users import UserManager
+from onyx.configs.app_configs import TRACK_EXTERNAL_IDP_EXPIRY
+from onyx.db.engine.async_sql_engine import get_async_session
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import Permission
 from onyx.db.models import User
@@ -46,6 +46,8 @@ basic_router = APIRouter(prefix="/enterprise-settings")
 
 logger = setup_logger()
 
+_CUSTOM_REFRESH_OAUTH_NAME = "custom"
+
 
 class RefreshTokenData(BaseModel):
     access_token: str
@@ -53,70 +55,63 @@ class RefreshTokenData(BaseModel):
     session: dict = Field(..., description="Contains session information")
     userinfo: dict = Field(..., description="Contains user information")
 
-    def __init__(self, **data: Any) -> None:
-        super().__init__(**data)
-        if "exp" not in self.session:
-            raise ValueError("'exp' must be set in the session dictionary")
-        if "userId" not in self.userinfo or "email" not in self.userinfo:
+    @model_validator(mode="after")
+    def _validate_session_and_userinfo(self) -> "RefreshTokenData":
+        exp = self.session.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+            raise ValueError("'exp' must be set to a number in the session dictionary")
+        # OAuthAccount.expires_at is a 32-bit integer column.
+        if not 0 <= exp / 1000 < 2**31:
+            raise ValueError("'exp' is not a valid timestamp")
+        if not isinstance(self.userinfo.get("userId"), str) or not isinstance(
+            self.userinfo.get("email"), str
+        ):
             raise ValueError(
-                "'userId' and 'email' must be set in the userinfo dictionary"
+                "'userId' and 'email' must be set to strings in the userinfo dictionary"
             )
+        return self
+
+    @property
+    def expiry(self) -> datetime:
+        return datetime.fromtimestamp(self.session["exp"] / 1000, tz=timezone.utc)
 
 
 @basic_router.post("/refresh-token")
 async def refresh_access_token(
     refresh_token: RefreshTokenData,
     user: User = Depends(current_user_with_expired_token),
-    user_manager: UserManager = Depends(get_user_manager),
+    db_session: AsyncSession = Depends(get_async_session),
 ) -> None:
-    try:
-        logger.debug(f"Received response from Meechum auth URL for user {user.id}")
+    # The body is client-supplied and is not verified with any IdP, so it may
+    # only refresh an OAuth account that is already linked to the caller.
+    user_id = user.id
 
-        # Extract new tokens
-        new_access_token = refresh_token.access_token
-        new_refresh_token = refresh_token.refresh_token
-
-        new_expiry = datetime.fromtimestamp(
-            refresh_token.session["exp"] / 1000, tz=timezone.utc
-        )
-        expires_at_timestamp = int(new_expiry.timestamp())
-
-        logger.debug(f"Access token has been refreshed for user {user.id}")
-
-        await user_manager.oauth_callback(
-            oauth_name="custom",
-            access_token=new_access_token,
-            account_id=refresh_token.userinfo["userId"],
-            account_email=refresh_token.userinfo["email"],
-            expires_at=expires_at_timestamp,
-            refresh_token=new_refresh_token,
-            associate_by_email=True,
+    if refresh_token.userinfo["email"].lower() != user.email.lower():
+        raise BasicAuthenticationError(
+            detail="Refresh token does not belong to the current user",
         )
 
-        logger.info(f"Successfully refreshed tokens for user {user.id}")
+    new_expiry = refresh_token.expiry
+    refreshed = await refresh_linked_oauth_account(
+        db_session=db_session,
+        user_id=user_id,
+        oauth_name=_CUSTOM_REFRESH_OAUTH_NAME,
+        account_id=refresh_token.userinfo["userId"],
+        access_token=refresh_token.access_token,
+        refresh_token=refresh_token.refresh_token,
+        expires_at=int(new_expiry.timestamp()),
+        # Matches oauth_callback: clear a stale expiry when tracking is off.
+        oidc_expiry=new_expiry if TRACK_EXTERNAL_IDP_EXPIRY else None,
+    )
+    if not refreshed:
+        logger.warning(
+            f"Rejected token refresh for user {user_id}: no linked account matches"
+        )
+        raise BasicAuthenticationError(
+            detail="Refresh token does not match an account linked to the current user",
+        )
 
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            logger.warning(f"Full authentication required for user {user.id}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Full authentication required",
-            )
-        logger.error(
-            f"HTTP error occurred while refreshing token for user {user.id}: {str(e)}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to refresh token",
-        )
-    except Exception as e:
-        logger.error(
-            f"Unexpected error occurred while refreshing token for user {user.id}: {str(e)}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred",
-        )
+    logger.info(f"Successfully refreshed tokens for user {user_id}")
 
 
 @admin_router.put("")
