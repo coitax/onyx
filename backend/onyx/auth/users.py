@@ -110,10 +110,13 @@ from onyx.configs.constants import OnyxRedisLocks
 from onyx.configs.constants import PASSWORD_SPECIAL_CHARS
 from onyx.configs.constants import UNNAMED_KEY_PLACEHOLDER
 from onyx.db.api_key import fetch_user_for_api_key
+from onyx.db.auth import claim_unverified_user__no_commit
+from onyx.db.auth import delete_access_tokens_for_user__no_commit
 from onyx.db.auth import get_access_token_db
 from onyx.db.auth import get_default_admin_user_emails
 from onyx.db.auth import get_user_count
 from onyx.db.auth import get_user_db
+from onyx.db.auth import lock_user_is_verified
 from onyx.db.auth import SQLAlchemyUserAdminDB
 from onyx.db.engine.async_sql_engine import get_async_session
 from onyx.db.engine.async_sql_engine import get_async_session_context_manager
@@ -125,6 +128,7 @@ from onyx.db.models import OAuthAccount
 from onyx.db.models import Persona
 from onyx.db.models import User
 from onyx.db.pat import fetch_user_for_pat
+from onyx.db.pat import revoke_all_pats_for_user__no_commit
 from onyx.db.users import assign_user_to_default_groups__no_commit
 from onyx.db.users import get_user_by_email
 from onyx.db.users import is_limited_user
@@ -155,6 +159,26 @@ from shared_configs.contextvars import get_current_tenant_id
 logger = setup_logger()
 
 REGISTER_INVITE_ONLY_CODE = "REGISTER_INVITE_ONLY"
+
+# Auth types that mount open password sign-up (/auth/register), so an
+# unverified account may have been registered by anyone who typed the address.
+_PASSWORD_SIGNUP_AUTH_TYPES = (AuthType.BASIC, AuthType.CLOUD)
+
+# Sessions issued while the user is unverified carry this marker and stop
+# working once the account is verified. 3 + 40 characters fits the 43-character
+# accesstoken.token column.
+UNVERIFIED_SESSION_TOKEN_PREFIX = "uv."
+_JWT_ISSUED_UNVERIFIED_CLAIM = "uv"
+
+
+def _new_session_token(user: User) -> str:
+    if user.is_verified:
+        return secrets.token_urlsafe()
+    return UNVERIFIED_SESSION_TOKEN_PREFIX + secrets.token_urlsafe(30)
+
+
+def _session_issued_before_verification(token: str, user: User) -> bool:
+    return user.is_verified and token.startswith(UNVERIFIED_SESSION_TOKEN_PREFIX)
 
 
 def is_user_admin(user: User) -> bool:
@@ -643,6 +667,69 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
             )
         return
 
+    async def _update(self, user: User, update_dict: dict[str, Any]) -> User:
+        if not user.is_verified:
+            # The row lock is held until super()._update commits, so a concurrent
+            # SSO claim either waits for this write or makes it fail here. A
+            # request authorized before the claim must not set a password or
+            # email on the claimed account.
+            stored_is_verified = await lock_user_is_verified(
+                self.user_db.session, user.id
+            )
+            if stored_is_verified:
+                await self.user_db.session.rollback()
+                raise OnyxError(
+                    OnyxErrorCode.UNAUTHENTICATED,
+                    "Account state changed, sign in again.",
+                )
+        return await super()._update(user, update_dict)
+
+    async def resolve_unverified_account_for_sso(
+        self, user: User, *, email_verified_by_idp: bool
+    ) -> User:
+        """An SSO identity matched an existing web account nobody has verified.
+
+        Where password sign-up is open, anyone could have registered the address
+        and still hold its password, sessions, tokens and settings, so the account
+        is never handed to the SSO identity. Elsewhere the account predates
+        SSO-only login: it is claimed and every credential issued for it before
+        is revoked.
+
+        Raises UserAlreadyExists when the account must not be linked.
+        """
+        if not email_verified_by_idp or AUTH_TYPE in _PASSWORD_SIGNUP_AUTH_TYPES:
+            logger.warning(
+                "Refusing to link SSO sign-in to unverified account %s", user.id
+            )
+            raise exceptions.UserAlreadyExists()
+        return await self._claim_unverified_account(user)
+
+    async def _claim_unverified_account(self, user: User) -> User:
+        user_id = user.id
+        # Runs before the claim commits so a failure leaves the account
+        # unverified and the next sign-in retries. Sessions issued from here on
+        # carry the unverified marker and are refused once the claim commits.
+        if AUTH_BACKEND == AuthBackend.REDIS:
+            await TenantAwareRedisStrategy().revoke_user_sessions(user_id)
+
+        db_session = self.user_db.session
+        if await claim_unverified_user__no_commit(
+            db_session,
+            user_id,
+            self.password_helper.hash(self.password_helper.generate()),
+        ):
+            await delete_access_tokens_for_user__no_commit(db_session, user_id)
+            await revoke_all_pats_for_user__no_commit(db_session, user_id)
+            logger.notice("SSO sign-in claimed unverified account %s", user_id)
+        await db_session.commit()
+
+        if user in db_session:
+            db_session.expire(user)
+        claimed = await self.user_db.get(user_id)
+        if claimed is None:
+            raise exceptions.UserNotExists()
+        return claimed
+
     @log_function_time(print_only=True)
     async def oauth_callback(
         self,
@@ -714,6 +801,10 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
 
                     # Make sure user is not None before adding OAuth account
                     if user is not None:
+                        if user.account_type.is_web_login() and not user.is_verified:
+                            user = await self.resolve_unverified_account_for_sso(
+                                user, email_verified_by_idp=is_verified_by_default
+                            )
                         user = await self.user_db.add_oauth_account(
                             user, oauth_account_dict
                         )
@@ -1145,7 +1236,7 @@ class TenantAwareRedisStrategy(RedisStrategy[User, uuid.UUID]):
             "sub": str(user.id),
             "tenant_id": tenant_id,
         }
-        token = secrets.token_urlsafe()
+        token = _new_session_token(user)
         await redis.set(
             f"{self.key_prefix}{token}",
             json.dumps(token_data),
@@ -1156,6 +1247,8 @@ class TenantAwareRedisStrategy(RedisStrategy[User, uuid.UUID]):
     async def read_token(
         self, token: Optional[str], user_manager: BaseUserManager[User, uuid.UUID]
     ) -> Optional[User]:
+        if token is None:
+            return None
         redis = await get_async_redis_connection()
         token_data_str = await redis.get(f"{self.key_prefix}{token}")
         if not token_data_str:
@@ -1165,14 +1258,48 @@ class TenantAwareRedisStrategy(RedisStrategy[User, uuid.UUID]):
             token_data = json.loads(token_data_str)
             user_id = token_data["sub"]
             parsed_id = user_manager.parse_id(user_id)
-            return await user_manager.get(parsed_id)
+            user = await user_manager.get(parsed_id)
         except (exceptions.UserNotExists, exceptions.InvalidID, KeyError):
             return None
+        if _session_issued_before_verification(token, user):
+            return None
+        return user
 
     async def destroy_token(self, token: str, user: User) -> None:  # noqa: ARG002
         """Properly delete the token from async redis."""
         redis = await get_async_redis_connection()
         await redis.delete(f"{self.key_prefix}{token}")
+
+    async def revoke_user_sessions(self, user_id: uuid.UUID) -> None:
+        """Delete every stored session of a user.
+
+        Sessions are keyed by token only, so this scans all of them. Use it for
+        rare events, not on a request path that runs often.
+        """
+        redis = await get_async_redis_connection()
+        subject = str(user_id)
+
+        async def delete_matching(keys: list[Any]) -> None:
+            matching: list[Any] = []
+            for key, value in zip(keys, await redis.mget(keys)):
+                if not value:
+                    continue
+                try:
+                    if json.loads(value).get("sub") == subject:
+                        matching.append(key)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+            if matching:
+                await redis.delete(*matching)
+
+        batch: list[Any] = []
+        async for key in redis.scan_iter(match=f"{self.key_prefix}*", count=1000):
+            batch.append(key)
+            if len(batch) >= 1000:
+                await delete_matching(batch)
+                batch = []
+        if batch:
+            await delete_matching(batch)
 
     async def refresh_token(self, token: Optional[str], user: User) -> str:
         """Refresh a token by extending its expiration time in Redis."""
@@ -1183,19 +1310,14 @@ class TenantAwareRedisStrategy(RedisStrategy[User, uuid.UUID]):
         redis = await get_async_redis_connection()
         token_key = f"{self.key_prefix}{token}"
 
-        # Check if token exists
-        token_data_str = await redis.get(token_key)
-        if not token_data_str:
-            # Token not found, create new one
+        # Only extends a key that still exists, so a session deleted meanwhile
+        # (logout, revocation) is never written back.
+        if self.lifetime_seconds is None:
+            still_exists = bool(await redis.exists(token_key))
+        else:
+            still_exists = bool(await redis.expire(token_key, self.lifetime_seconds))
+        if not still_exists:
             return await self.write_token(user)
-
-        # Token exists, extend its lifetime
-        token_data = json.loads(token_data_str)
-        await redis.set(
-            token_key,
-            json.dumps(token_data),
-            ex=self.lifetime_seconds,
-        )
 
         return token
 
@@ -1210,6 +1332,19 @@ class RefreshableDatabaseStrategy(DatabaseStrategy[User, uuid.UUID, AccessToken]
     ):
         super().__init__(access_token_db, lifetime_seconds)
         self._access_token_db = access_token_db
+
+    async def read_token(
+        self, token: Optional[str], user_manager: BaseUserManager[User, uuid.UUID]
+    ) -> Optional[User]:
+        user = await super().read_token(token, user_manager)
+        if user is None or token is None:
+            return None
+        if _session_issued_before_verification(token, user):
+            return None
+        return user
+
+    def _create_access_token_dict(self, user: User) -> dict[str, Any]:
+        return {"token": _new_session_token(user), "user_id": user.id}
 
     async def refresh_token(self, token: Optional[str], user: User) -> str:
         """Refresh a token by updating its expiration time in the database."""
@@ -1266,10 +1401,36 @@ class SingleTenantJWTStrategy(JWTStrategy[User, uuid.UUID]):
             "sub": str(user.id),
             "aud": self.token_audience,
             "iat": int(datetime.now(timezone.utc).timestamp()),
+            _JWT_ISSUED_UNVERIFIED_CLAIM: not user.is_verified,
         }
         return generate_jwt(
             data, self.encode_key, self.lifetime_seconds, algorithm=self.algorithm
         )
+
+    async def read_token(
+        self, token: Optional[str], user_manager: BaseUserManager[User, uuid.UUID]
+    ) -> Optional[User]:
+        if token is None:
+            return None
+        try:
+            data = decode_jwt(
+                token, self.decode_key, self.token_audience, algorithms=[self.algorithm]
+            )
+            user_id = data.get("sub")
+            if user_id is None:
+                return None
+        except jwt.PyJWTError:
+            return None
+
+        try:
+            user = await user_manager.get(user_manager.parse_id(user_id))
+        except (exceptions.UserNotExists, exceptions.InvalidID):
+            return None
+        # A token without the claim predates it and cannot show it was issued
+        # after the account was verified.
+        if user.is_verified and data.get(_JWT_ISSUED_UNVERIFIED_CLAIM, True):
+            return None
+        return user
 
     async def destroy_token(self, token: str, user: User) -> None:  # noqa: ARG002
         # JWTs are stateless — nothing to invalidate server-side.
@@ -1535,6 +1696,13 @@ async def _get_or_create_user_from_jwt(
             return None
         if not user.account_type.is_web_login():
             raise exceptions.UserNotExists()
+        if not user.is_verified:
+            try:
+                user = await user_manager.resolve_unverified_account_for_sso(
+                    user, email_verified_by_idp=True
+                )
+            except exceptions.UserAlreadyExists:
+                return None
     except exceptions.UserNotExists:
         logger.info("Provisioning user %s from JWT login", email)
         try:

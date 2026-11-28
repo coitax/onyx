@@ -72,6 +72,10 @@ async def upsert_saml_user(email: str) -> User:
                     # If user has a non-authenticated role, treat as non-existent
                     if not user.account_type.is_web_login():
                         raise exceptions.UserNotExists()
+                    if not user.is_verified:
+                        user = await user_manager.resolve_unverified_account_for_sso(
+                            user, email_verified_by_idp=True
+                        )
                     return user
                 except exceptions.UserNotExists:
                     logger.info("Creating user from SAML login")

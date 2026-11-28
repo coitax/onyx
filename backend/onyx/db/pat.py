@@ -90,14 +90,27 @@ def create_pat(
     user_id: UUID,
     name: str,
     expiration_days: int | None,
+    authorized_is_verified: bool | None = None,
 ) -> tuple[PersonalAccessToken, str]:
     """Create new PAT. Returns (db_record, raw_token).
 
-    Raises ValueError if user is inactive or not found.
+    ``authorized_is_verified`` is the user's is_verified as seen when the request
+    was authenticated. If the stored value differs (e.g. an SSO sign-in claimed
+    the account mid-request), no token is created.
+
+    Raises ValueError if user is inactive or not found, or its verification
+    state changed since authorization.
     """
-    user = db_session.scalar(select(User).where(User.id == user_id))  # type: ignore
+    user = db_session.scalar(
+        select(User).where(User.id == user_id).with_for_update()  # type: ignore
+    )
     if not user or not user.is_active:
         raise ValueError("Cannot create PAT for inactive or non-existent user")
+    if (
+        authorized_is_verified is not None
+        and user.is_verified != authorized_is_verified
+    ):
+        raise ValueError("Account state changed, sign in again to create a token")
 
     tenant_id = get_current_tenant_id()
     raw_token = generate_pat(tenant_id)
@@ -153,3 +166,18 @@ def revoke_pat(db_session: Session, pat_id: int, user_id: UUID) -> bool:
     pat.is_revoked = True
     db_session.commit()
     return True
+
+
+async def revoke_all_pats_for_user__no_commit(
+    db_session: AsyncSession, user_id: UUID
+) -> None:
+    now = datetime.now(timezone.utc)
+    await db_session.execute(
+        update(PersonalAccessToken)
+        .where(PersonalAccessToken.user_id == user_id)
+        .where(
+            (PersonalAccessToken.expires_at.is_(None))
+            | (PersonalAccessToken.expires_at > now)
+        )
+        .values(expires_at=now, is_revoked=True)
+    )

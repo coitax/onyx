@@ -1,16 +1,21 @@
 from collections.abc import AsyncGenerator
 from collections.abc import Callable
 from typing import Any
+from typing import cast
 from typing import Dict
 from typing import TypeVar
+from uuid import UUID
 
 from fastapi import Depends
 from fastapi_users.models import ID
 from fastapi_users.models import UP
 from fastapi_users_db_sqlalchemy import SQLAlchemyUserDatabase
 from fastapi_users_db_sqlalchemy.access_token import SQLAlchemyAccessTokenDatabase
+from sqlalchemy import CursorResult
+from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import Select
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import Session
@@ -107,6 +112,41 @@ class SQLAlchemyUserAdminDB(SQLAlchemyUserDatabase[UP, ID]):
         else:
             create_dict["role"] = UserRole.BASIC
         return await super().create(create_dict)
+
+
+async def lock_user_is_verified(db_session: AsyncSession, user_id: UUID) -> bool | None:
+    """Return the user's stored is_verified and hold the row lock until the
+    caller's transaction ends. None if the user no longer exists."""
+    return await db_session.scalar(
+        select(User.is_verified)  # type: ignore[call-overload]
+        .where(User.id == user_id)  # type: ignore[arg-type]
+        .with_for_update()
+    )
+
+
+async def claim_unverified_user__no_commit(
+    db_session: AsyncSession, user_id: UUID, hashed_password: str
+) -> bool:
+    """Replace the password of an unverified user and mark it verified.
+
+    Returns False if the row was already verified, in which case nothing changes.
+    """
+    result = await db_session.execute(
+        update(User)
+        .where(User.id == user_id)  # type: ignore[arg-type]
+        .where(User.is_verified.is_(False))  # type: ignore[attr-defined]
+        .values(hashed_password=hashed_password, is_verified=True)
+        .execution_options(synchronize_session=False)
+    )
+    return cast(CursorResult[Any], result).rowcount > 0
+
+
+async def delete_access_tokens_for_user__no_commit(
+    db_session: AsyncSession, user_id: UUID
+) -> None:
+    await db_session.execute(
+        delete(AccessToken).where(AccessToken.user_id == user_id)  # type: ignore[arg-type]
+    )
 
 
 async def get_user_db(
