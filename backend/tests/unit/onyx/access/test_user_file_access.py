@@ -67,17 +67,20 @@ class TestCollectUserFileAccess:
         assert emails == {"owner@test.com", "shared@test.com"}
         assert is_public is False
 
-    def test_persona_owner_added(self) -> None:
-        """Persona owner (different from file owner) gets access too."""
+    def test_persona_owned_by_someone_else_ignored(self) -> None:
+        """A persona the file owner does not own grants no access to the file."""
         file_owner = _make_user("file-owner@test.com")
         persona_owner = _make_user("persona-owner@test.com")
-        persona = _make_persona(owner=persona_owner)
+        shared = _make_user("shared@test.com")
+        persona = _make_persona(
+            owner=persona_owner, shared_users=[shared], is_public=True
+        )
         uf = _make_user_file(owner=file_owner, assistants=[persona])
 
         emails, is_public = collect_user_file_access(uf)
 
-        assert "file-owner@test.com" in emails
-        assert "persona-owner@test.com" in emails
+        assert emails == {"file-owner@test.com"}
+        assert is_public is False
 
     def test_public_persona_makes_file_public(self) -> None:
         owner = _make_user("owner@test.com")

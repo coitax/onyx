@@ -18,6 +18,7 @@ from onyx.db.document import get_documents_by_ids
 from onyx.db.models import User
 from onyx.db.models import UserFile
 from onyx.db.user_file import fetch_user_files_with_access_relationships
+from onyx.db.user_file import persona_can_use_user_file
 from onyx.utils.logger import setup_logger
 
 
@@ -124,7 +125,7 @@ def _collect_user_file_group_names(user_file: UserFile) -> set[str]:
     relationships on a UserFile (skipping deleted personas)."""
     groups: set[str] = set()
     for persona in user_file.assistants:
-        if persona.deleted:
+        if persona.deleted or not persona_can_use_user_file(persona, user_file):
             continue
         for group in persona.groups:
             groups.add(group.name)

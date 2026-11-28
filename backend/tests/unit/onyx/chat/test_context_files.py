@@ -27,10 +27,14 @@ from onyx.tools.models import SearchToolUsage
 # ---------------------------------------------------------------------------
 
 
+_OWNER_ID = uuid4()
+
+
 def _make_user_file(
     token_count: int = 100,
     name: str = "file.txt",
     file_id: str | None = None,
+    user_id: UUID = _OWNER_ID,
 ) -> UserFile:
     file_uuid = UUID(file_id) if file_id else uuid4()
     return UserFile(
@@ -38,6 +42,7 @@ def _make_user_file(
         file_id=str(file_uuid),
         name=name,
         token_count=token_count,
+        user_id=user_id,
     )
 
 
@@ -47,6 +52,7 @@ def _make_persona(
 ) -> MagicMock:
     persona = MagicMock()
     persona.id = persona_id
+    persona.user_id = _OWNER_ID
     persona.user_files = user_files or []
     return persona
 
@@ -83,6 +89,17 @@ class TestResolveContextUserFiles:
         )
 
         assert result == persona_files
+
+    def test_custom_persona_skips_files_owned_by_someone_else(self) -> None:
+        owned = _make_user_file()
+        foreign = _make_user_file(user_id=uuid4())
+        persona = _make_persona(persona_id=42, user_files=[owned, foreign])
+
+        result = resolve_context_user_files(
+            persona=persona, project_id=99, user_id=uuid4(), db_session=MagicMock()
+        )
+
+        assert result == [owned]
 
     def test_custom_persona_without_files_returns_empty(self) -> None:
         """Custom persona with no files should NOT fall through to project."""

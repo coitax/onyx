@@ -47,6 +47,7 @@ from onyx.db.models import UserFile
 from onyx.db.search_settings import get_active_search_settings
 from onyx.db.search_settings import get_active_search_settings_list
 from onyx.db.user_file import fetch_user_files_with_access_relationships
+from onyx.db.user_file import persona_can_use_user_file
 from onyx.document_index.factory import get_all_document_indices
 from onyx.document_index.interfaces import VespaDocumentFields
 from onyx.document_index.interfaces import VespaDocumentUserFields
@@ -890,7 +891,11 @@ def project_sync_user_file_impl(
                 ]
 
                 project_ids = [project.id for project in user_file.projects]
-                persona_ids = [p.id for p in user_file.assistants if not p.deleted]
+                persona_ids = [
+                    p.id
+                    for p in user_file.assistants
+                    if not p.deleted and persona_can_use_user_file(p, user_file)
+                ]
 
                 file_id_str = str(user_file.id)
                 access_map = build_access_for_user_files([user_file])

@@ -12,6 +12,7 @@ from onyx.db.document import get_access_info_for_documents
 from onyx.db.models import User
 from onyx.db.models import UserFile
 from onyx.db.user_file import fetch_user_files_with_access_relationships
+from onyx.db.user_file import persona_can_use_user_file
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
 from onyx.utils.variable_functionality import fetch_versioned_implementation
 
@@ -176,6 +177,15 @@ def build_access_for_user_files_impl(
     return result
 
 
+def user_can_access_user_file(
+    user: User, user_file: UserFile, db_session: Session
+) -> bool:
+    """Same rule search uses for user file documents. `user_file` must be
+    loaded with the relationships `build_access_for_user_files` needs."""
+    access = build_access_for_user_files([user_file])[str(user_file.id)]
+    return not access.to_acl().isdisjoint(get_acl_for_user(user, db_session))
+
+
 def collect_user_file_access(user_file: UserFile) -> tuple[set[str], bool]:
     """Collect all user emails that should have access to this user file.
     Includes the owner plus any users who have access via shared personas.
@@ -183,7 +193,7 @@ def collect_user_file_access(user_file: UserFile) -> tuple[set[str], bool]:
     emails: set[str] = {user_file.user.email}
     is_public = False
     for persona in user_file.assistants:
-        if persona.deleted:
+        if persona.deleted or not persona_can_use_user_file(persona, user_file):
             continue
         if persona.is_public:
             is_public = True

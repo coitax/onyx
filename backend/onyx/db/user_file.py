@@ -12,6 +12,23 @@ from onyx.db.models import Project__UserFile
 from onyx.db.models import UserFile
 
 
+def persona_can_use_user_file(persona: Persona, user_file: UserFile) -> bool:
+    """A persona may only expose user files that belong to the persona's owner.
+
+    Persona ownership never changes after creation, so a file linked to a
+    persona owned by someone else must not be served, searched, or granted
+    access through that persona."""
+    return persona.user_id == user_file.user_id
+
+
+def get_usable_persona_user_files(persona: Persona) -> list[UserFile]:
+    return [
+        user_file
+        for user_file in persona.user_files
+        if persona_can_use_user_file(persona, user_file)
+    ]
+
+
 def fetch_chunk_counts_for_user_files(
     user_file_ids: list[str],
     db_session: Session,
@@ -87,7 +104,11 @@ def fetch_persona_ids_for_user_files(
     )
     results = db_session.execute(stmt).scalars().all()
     return {
-        str(user_file.id): [persona.id for persona in user_file.assistants]
+        str(user_file.id): [
+            persona.id
+            for persona in user_file.assistants
+            if persona_can_use_user_file(persona, user_file)
+        ]
         for user_file in results
     }
 
@@ -108,11 +129,13 @@ def update_last_accessed_at_for_user_files(
     db_session.commit()
 
 
-def get_file_id_by_user_file_id(user_file_id: str, db_session: Session) -> str | None:
-    user_file = db_session.query(UserFile).filter(UserFile.id == user_file_id).first()
-    if user_file:
-        return user_file.file_id
-    return None
+def fetch_user_file_with_access_relationships(
+    user_file_id: str, db_session: Session
+) -> UserFile | None:
+    user_files = fetch_user_files_with_access_relationships(
+        [user_file_id], db_session, eager_load_groups=True
+    )
+    return user_files[0] if user_files else None
 
 
 def get_file_ids_by_user_file_ids(
