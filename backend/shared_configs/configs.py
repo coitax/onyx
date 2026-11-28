@@ -118,34 +118,36 @@ PRESERVED_SEARCH_FIELDS = [
 
 
 def validate_cors_origin(origin: str) -> None:
+    # CORS is configured with allow_credentials, and Starlette answers a
+    # credentialed request to a wildcard policy by reflecting the caller's
+    # Origin, so a wildcard would let any site make authenticated calls.
+    if origin == "*":
+        raise ValueError(
+            f"Invalid CORS origin: '{origin}'. Wildcard origins are not allowed "
+            "because credentials are enabled; list each trusted origin explicitly."
+        )
     parsed = urlparse(origin)
     if parsed.scheme not in ["http", "https"] or not parsed.netloc:
         raise ValueError(f"Invalid CORS origin: '{origin}'")
 
 
+def parse_cors_origins(raw_origins: str) -> List[str]:
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    for origin in origins:
+        validate_cors_origin(origin)
+    return origins
+
+
+# Additional origins allowed to make credentialed cross-origin requests to the
+# API. The web UI is served from the same origin as the API, so this is empty by
+# default and no CORS headers are sent.
 # Examples of valid values for the environment variable:
-# - "" (allow all origins)
+# - "" (no cross-origin access, default)
 # - "http://example.com" (single origin)
 # - "http://example.com,https://example.org" (multiple origins)
-# - "*" (allow all origins)
-CORS_ALLOWED_ORIGIN_ENV = os.environ.get("CORS_ALLOWED_ORIGIN", "")
-
-# Explicitly declare the type of CORS_ALLOWED_ORIGIN
-CORS_ALLOWED_ORIGIN: List[str]
-
-if CORS_ALLOWED_ORIGIN_ENV:
-    # Split the environment variable into a list of origins
-    CORS_ALLOWED_ORIGIN = [
-        origin.strip()
-        for origin in CORS_ALLOWED_ORIGIN_ENV.split(",")
-        if origin.strip()
-    ]
-    # Validate each origin in the list
-    for origin in CORS_ALLOWED_ORIGIN:
-        validate_cors_origin(origin)
-else:
-    # If the environment variable is empty, allow all origins
-    CORS_ALLOWED_ORIGIN = ["*"]
+CORS_ALLOWED_ORIGIN: List[str] = parse_cors_origins(
+    os.environ.get("CORS_ALLOWED_ORIGIN", "")
+)
 
 
 # Multi-tenancy configuration
