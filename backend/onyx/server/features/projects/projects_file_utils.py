@@ -66,6 +66,11 @@ def is_upload_too_large(upload: UploadFile, max_bytes: int) -> bool:
 # Guard against extremely large images
 Image.MAX_IMAGE_PIXELS = 12000 * 12000
 
+# Pillow formats for OnyxFileExtensions.IMAGE_EXTENSIONS. Without this, Image.open
+# sniffs the content and runs any decoder Pillow ships (e.g. TIFF) behind an
+# allowed image extension.
+_ALLOWED_UPLOAD_IMAGE_FORMATS = ("PNG", "JPEG", "WEBP")
+
 
 class RejectedFile(BaseModel):
     filename: str = Field(default="")
@@ -138,7 +143,7 @@ def estimate_image_tokens_for_upload(
     Always resets the file pointer before returning.
     """
     try:
-        img = Image.open(upload.file)
+        img = Image.open(upload.file, formats=_ALLOWED_UPLOAD_IMAGE_FORMATS)
         img = ImageOps.exif_transpose(img)
         width, height = img.size
         capped_w, capped_h = _apply_long_side_cap(width, height, cap=cap_long_side)
