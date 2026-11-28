@@ -55,6 +55,8 @@ const sharedConfig = {
         "until-async",
         // Language Detection
         "linguist-languages",
+        // MIME lookup used by PreviewModal. The package is ESM-only.
+        "mime",
         // Markdown & Syntax Highlighting
         "react-markdown",
         "remark-.*", // All remark packages
