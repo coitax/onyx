@@ -12,6 +12,23 @@ from onyx.db.models import Project__UserFile
 from onyx.db.models import UserFile
 
 
+def persona_can_use_user_file(persona: Persona, user_file: UserFile) -> bool:
+    """A persona may only expose user files that belong to the persona's owner.
+
+    Persona ownership never changes after creation, so a file linked to a
+    persona owned by someone else must not be served, searched, or granted
+    access through that persona."""
+    return persona.user_id == user_file.user_id
+
+
+def get_usable_persona_user_files(persona: Persona) -> list[UserFile]:
+    return [
+        user_file
+        for user_file in persona.user_files
+        if persona_can_use_user_file(persona, user_file)
+    ]
+
+
 def fetch_chunk_counts_for_user_files(
     user_file_ids: list[str],
     db_session: Session,
@@ -87,7 +104,11 @@ def fetch_persona_ids_for_user_files(
     )
     results = db_session.execute(stmt).scalars().all()
     return {
-        str(user_file.id): [persona.id for persona in user_file.assistants]
+        str(user_file.id): [
+            persona.id
+            for persona in user_file.assistants
+            if persona_can_use_user_file(persona, user_file)
+        ]
         for user_file in results
     }
 

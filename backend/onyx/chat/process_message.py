@@ -76,6 +76,7 @@ from onyx.db.models import User
 from onyx.db.models import UserFile
 from onyx.db.projects import get_user_files_from_project
 from onyx.db.tools import get_tools
+from onyx.db.user_file import get_usable_persona_user_files
 from onyx.deep_research.dr_loop import run_deep_research_llm_loop
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import log_onyx_error
@@ -219,12 +220,13 @@ def resolve_context_user_files(
     custom persona, the project is purely organisational — its files are
     never loaded and never made searchable.
 
-    Custom persona → persona's own user_files (may be empty).
+    Custom persona → persona's own user_files owned by the persona's owner
+    (may be empty).
     Default persona inside a project → project files.
     Otherwise → empty list.
     """
     if persona.id != DEFAULT_PERSONA_ID:
-        return list(persona.user_files) if persona.user_files else []
+        return get_usable_persona_user_files(persona)
     if project_id:
         return get_user_files_from_project(
             project_id=project_id,
@@ -780,7 +782,7 @@ def build_chat_turn(
     # Also grant access to persona-attached user files for FileReaderTool
     if persona.user_files:
         existing = set(available_files.user_file_ids)
-        for uf in persona.user_files:
+        for uf in get_usable_persona_user_files(persona):
             if uf.id not in existing:
                 available_files.user_file_ids.append(uf.id)
 
