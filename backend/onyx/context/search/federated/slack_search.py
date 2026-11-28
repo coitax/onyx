@@ -1,6 +1,9 @@
+import fnmatch
 import json
 import re
 import time
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from typing import Any
 from typing import cast
@@ -29,6 +32,7 @@ from onyx.context.search.federated.slack_search_utils import (
     get_channel_type_for_missing_scope,
 )
 from onyx.context.search.federated.slack_search_utils import is_recency_query
+from onyx.context.search.federated.slack_search_utils import matches_exclude_pattern
 from onyx.context.search.federated.slack_search_utils import should_include_message
 from onyx.context.search.models import ChunkIndexRequest
 from onyx.context.search.models import InferenceChunk
@@ -420,16 +424,151 @@ class SlackQueryResult(BaseModel):
     filtered_channels: list[str]  # Channels filtered out during this query
 
 
+@dataclass(frozen=True)
+class DirectThreadAccessPolicy:
+    """Channel access rules for threads fetched from a URL in the user's query.
+
+    The default (no bot context, no connector config) is only appropriate when
+    the access token belongs to the person asking.
+    """
+
+    # When set, private channels / DMs / group DMs are only readable if they are
+    # the conversation the bot was asked in, since the bot answers there with a
+    # token that can read far more than the asker.
+    bot_context: bool = False
+    current_channel_id: str | None = None
+    entities: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _AuthorizedChannel:
+    channel_id: str
+    channel_name: str
+    channel_type: ChannelType
+
+
+def _classify_direct_fetch_channel(channel_info: dict[str, Any]) -> ChannelType:
+    if channel_info.get("is_im"):
+        return ChannelType.IM
+    if channel_info.get("is_mpim"):
+        return ChannelType.MPIM
+    # Unknown privacy is treated as private so the restrictive rules apply
+    if channel_info.get("is_private", True):
+        return ChannelType.PRIVATE_CHANNEL
+    return ChannelType.PUBLIC_CHANNEL
+
+
+def _is_direct_fetch_allowed(
+    channel: _AuthorizedChannel, policy: DirectThreadAccessPolicy
+) -> bool:
+    is_private_or_dm = channel.channel_type in (
+        ChannelType.PRIVATE_CHANNEL,
+        ChannelType.IM,
+        ChannelType.MPIM,
+    )
+    if (
+        policy.bot_context
+        and is_private_or_dm
+        and channel.channel_id != policy.current_channel_id
+    ):
+        return False
+
+    entities = policy.entities
+    if not entities:
+        return True
+
+    if not should_include_message(channel.channel_type, entities):
+        return False
+
+    try:
+        parsed_entities = SlackEntities(**entities)
+    except ValidationError:
+        logger.warning("Invalid entities for direct thread fetch, refusing fetch")
+        return False
+
+    if parsed_entities.exclude_channels and matches_exclude_pattern(
+        channel.channel_name, parsed_entities.exclude_channels
+    ):
+        return False
+
+    # Mirrors keyword search: a channel list restricts results unless include_dm
+    # adds the unfiltered all-conversations search.
+    if (
+        not parsed_entities.search_all_channels
+        and parsed_entities.channels
+        and not entities.get("include_dm")
+    ):
+        channel_norm = channel.channel_name.lower().strip().lstrip("#")
+        if not any(
+            fnmatch.fnmatch(channel_norm, pattern.lower().strip().lstrip("#"))
+            for pattern in parsed_entities.channels
+        ):
+            return False
+
+    return True
+
+
+def _authorize_direct_fetch_channel(
+    channel_id: str,
+    slack_client: WebClient,
+    policy: DirectThreadAccessPolicy,
+) -> _AuthorizedChannel | None:
+    try:
+        ch_response = slack_client.conversations_info(channel=channel_id)
+        ch_response.validate()
+        channel_info: Any = ch_response.get("channel", {})
+    except SlackApiError as e:
+        logger.warning(
+            f"Could not determine channel type for direct thread fetch (channel={channel_id}), refusing fetch: {e}"
+        )
+        return None
+
+    if not isinstance(channel_info, dict):
+        return None
+    if channel_info.get("id", channel_id) != channel_id:
+        logger.warning(
+            f"Channel lookup for direct thread fetch returned a different channel (requested={channel_id}), refusing fetch"
+        )
+        return None
+
+    channel = _AuthorizedChannel(
+        channel_id=channel_id,
+        channel_name=channel_info.get("name") or "unknown",
+        channel_type=_classify_direct_fetch_channel(channel_info),
+    )
+    if not _is_direct_fetch_allowed(channel, policy):
+        logger.info(
+            f"Direct thread fetch refused by channel access rules (channel={channel_id}, type={channel.channel_type.value})"
+        )
+        return None
+    return channel
+
+
 def _fetch_thread_from_url(
     thread_fetch: DirectThreadFetch,
     access_token: str,
-    channel_metadata_dict: dict[str, ChannelMetadata] | None = None,
+    access_policy: DirectThreadAccessPolicy | None = None,
 ) -> SlackQueryResult:
-    """Fetch a thread directly from a Slack URL via conversations.replies."""
-    channel_id = thread_fetch.channel_id
+    """Fetch a thread directly from a Slack URL via conversations.replies.
+
+    The channel is authorized before any message content is read, and the
+    replies call is made against that authorized channel only.
+    """
+    slack_client = WebClient(token=access_token)
+    channel = _authorize_direct_fetch_channel(
+        thread_fetch.channel_id,
+        slack_client,
+        access_policy or DirectThreadAccessPolicy(),
+    )
+    if channel is None:
+        return SlackQueryResult(
+            messages=[], filtered_channels=[thread_fetch.channel_id]
+        )
+
+    channel_id = channel.channel_id
+    channel_name = channel.channel_name
     thread_ts = thread_fetch.thread_ts
 
-    slack_client = WebClient(token=access_token)
     try:
         response = slack_client.conversations_replies(
             channel=channel_id,
@@ -451,19 +590,6 @@ def _fetch_thread_from_url(
 
     # Build thread text from all messages
     thread_text = _build_thread_text(messages, access_token, None, slack_client)
-
-    # Get channel name from metadata cache or API
-    channel_name = "unknown"
-    if channel_metadata_dict and channel_id in channel_metadata_dict:
-        channel_name = channel_metadata_dict[channel_id].get("name", "unknown")
-    else:
-        try:
-            ch_response = slack_client.conversations_info(channel=channel_id)
-            ch_response.validate()
-            channel_info: dict[str, Any] = ch_response.get("channel", {})
-            channel_name = channel_info.get("name", "unknown")
-        except SlackApiError:
-            pass
 
     # Build the SlackMessage
     parent_msg = messages[0]
@@ -1062,11 +1188,19 @@ def slack_retrieval(
                 f"Private channel context: will only allow messages from {allowed_private_channel} + public channels"
             )
 
+    direct_fetch_policy = DirectThreadAccessPolicy(
+        bot_context=bool(bot_token or slack_event_context),
+        current_channel_id=(
+            slack_event_context.channel_id if slack_event_context else None
+        ),
+        entities=entities,
+    )
+
     # Build search tasks — direct thread fetches + keyword searches
     search_tasks: list[tuple] = [
         (
             _fetch_thread_from_url,
-            (fetch, access_token, channel_metadata_dict),
+            (fetch, access_token, direct_fetch_policy),
         )
         for fetch in direct_fetches
     ]
