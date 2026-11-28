@@ -129,11 +129,13 @@ def update_last_accessed_at_for_user_files(
     db_session.commit()
 
 
-def get_file_id_by_user_file_id(user_file_id: str, db_session: Session) -> str | None:
-    user_file = db_session.query(UserFile).filter(UserFile.id == user_file_id).first()
-    if user_file:
-        return user_file.file_id
-    return None
+def fetch_user_file_with_access_relationships(
+    user_file_id: str, db_session: Session
+) -> UserFile | None:
+    user_files = fetch_user_files_with_access_relationships(
+        [user_file_id], db_session, eager_load_groups=True
+    )
+    return user_files[0] if user_files else None
 
 
 def get_file_ids_by_user_file_ids(

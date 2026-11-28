@@ -177,6 +177,15 @@ def build_access_for_user_files_impl(
     return result
 
 
+def user_can_access_user_file(
+    user: User, user_file: UserFile, db_session: Session
+) -> bool:
+    """Same rule search uses for user file documents. `user_file` must be
+    loaded with the relationships `build_access_for_user_files` needs."""
+    access = build_access_for_user_files([user_file])[str(user_file.id)]
+    return not access.to_acl().isdisjoint(get_acl_for_user(user, db_session))
+
+
 def collect_user_file_access(user_file: UserFile) -> tuple[set[str], bool]:
     """Collect all user emails that should have access to this user file.
     Includes the owner plus any users who have access via shared personas.
