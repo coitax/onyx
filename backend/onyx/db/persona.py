@@ -38,6 +38,8 @@ from onyx.db.models import User__UserGroup
 from onyx.db.models import UserFile
 from onyx.db.models import UserGroup
 from onyx.db.notification import create_notification
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.server.features.persona.models import FullPersonaSnapshot
 from onyx.server.features.persona.models import MinimalPersonaSnapshot
 from onyx.server.features.persona.models import PersonaSharedNotificationData
@@ -117,7 +119,9 @@ def _add_user_filters(
         UserRole.CURATOR,
         UserRole.GLOBAL_CURATOR,
     ]:
-        where_clause = (Persona.user_id == user.id) | (Persona.user_id.is_(None))
+        where_clause = Persona.user_id == user.id
+        if not get_editable:
+            where_clause |= Persona.user_id.is_(None)
         return stmt.where(where_clause)
 
     where_clause = User__UserGroup.user_id == user.id
@@ -781,6 +785,15 @@ def mark_persona_as_deleted(
     db_session: Session,
 ) -> None:
     persona = get_persona_by_id(persona_id=persona_id, user=user, db_session=db_session)
+    # Builtin agents (including the default assistant) are only removable by
+    # system paths, which call this without a user.
+    if user is not None and (
+        persona.builtin_persona or persona.id == DEFAULT_PERSONA_ID
+    ):
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            f"Persona with ID {persona_id} is a built-in agent and cannot be deleted",
+        )
     persona.deleted = True
     affected_file_ids = [uf.id for uf in persona.user_files]
     if affected_file_ids:
@@ -1235,9 +1248,10 @@ def get_persona_by_id(
 
     # or check if user owns persona
     or_conditions = Persona.user_id == user.id
-    # allow access if persona user id is None
-    or_conditions |= Persona.user_id == None  # noqa: E711
     if not is_for_edit:
+        # ownerless personas (default assistant, Slack channel agents) are
+        # readable, but only admins may edit them
+        or_conditions |= Persona.user_id == None  # noqa: E711
         # if the user is in a group related to the persona
         or_conditions |= User__UserGroup.user_id == user.id
         # if the user is in the .users of the persona
