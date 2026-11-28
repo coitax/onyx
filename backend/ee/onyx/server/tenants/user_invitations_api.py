@@ -13,6 +13,8 @@ from onyx.auth.invited_users import get_pending_users
 from onyx.auth.permissions import require_permission
 from onyx.auth.users import User
 from onyx.db.enums import Permission
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.utils.logger import setup_logger
 from shared_configs.contextvars import get_current_tenant_id
 
@@ -49,7 +51,13 @@ async def approve_user(
     _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> None:
     tenant_id = get_current_tenant_id()
-    approve_user_invite(approve_user_request.email, tenant_id)
+    email = approve_user_request.email
+    if email not in get_pending_users():
+        raise OnyxError(
+            OnyxErrorCode.NOT_FOUND,
+            "No pending request to join this workspace for this email",
+        )
+    approve_user_invite(email, tenant_id)
 
 
 @router.post("/users/invite/accept")

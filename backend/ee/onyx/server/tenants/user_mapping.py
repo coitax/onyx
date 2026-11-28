@@ -1,3 +1,5 @@
+from typing import cast
+
 from fastapi_users import exceptions
 from sqlalchemy import select
 
@@ -5,9 +7,14 @@ from onyx.auth.invited_users import get_invited_users
 from onyx.auth.invited_users import get_pending_users
 from onyx.auth.invited_users import write_invited_users
 from onyx.auth.invited_users import write_pending_users
+from onyx.configs.constants import KV_PENDING_USERS_KEY
 from onyx.db.engine.sql_engine import get_session_with_shared_schema
 from onyx.db.engine.sql_engine import get_session_with_tenant
+from onyx.db.models import KVStore
 from onyx.db.models import UserTenantMapping
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
+from onyx.key_value_store.factory import get_kv_store
 from onyx.server.manage.models import TenantSnapshot
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
@@ -178,32 +185,63 @@ def invite_self_to_tenant(email: str, tenant_id: str) -> None:
 
 def approve_user_invite(email: str, tenant_id: str) -> None:
     """
-    Approve a user invite to a tenant.
-    This will delete all existing records for this email and create a new mapping entry for the user in this tenant.
-    """
-    with get_session_with_shared_schema() as db_session:
-        # Delete all existing records for this email
-        db_session.query(UserTenantMapping).filter(
-            UserTenantMapping.email == email
-        ).delete()
+    Approve a pending request from `email` to join `tenant_id`.
 
-        # Create a new mapping entry for the user in this tenant
-        new_mapping = UserTenantMapping(email=email, tenant_id=tenant_id, active=True)
-        db_session.add(new_mapping)
+    The request is consumed from the tenant's pending list and the invitation
+    mapping is written in one transaction while the pending list row is locked,
+    so a request that was withdrawn or never made cannot be approved.
+
+    Mappings to other tenants are left untouched. If the user already belongs
+    to another tenant they get an inactive mapping (invitation) here and switch
+    only by accepting it from their own session.
+    """
+    with get_session_with_tenant(tenant_id=tenant_id) as db_session:
+        pending_row = (
+            db_session.query(KVStore)
+            .filter(KVStore.key == KV_PENDING_USERS_KEY)
+            .with_for_update()
+            .one_or_none()
+        )
+        pending_users = (
+            cast(list[str], pending_row.value)
+            if pending_row is not None and isinstance(pending_row.value, list)
+            else []
+        )
+        if pending_row is None or email not in pending_users:
+            raise OnyxError(
+                OnyxErrorCode.NOT_FOUND,
+                "No pending request to join this workspace for this email",
+            )
+
+        existing_mappings = (
+            db_session.query(UserTenantMapping)
+            .filter(UserTenantMapping.email == email)
+            .with_for_update()
+            .all()
+        )
+        if not any(m.tenant_id == tenant_id for m in existing_mappings):
+            db_session.add(
+                UserTenantMapping(
+                    email=email,
+                    tenant_id=tenant_id,
+                    active=not any(m.active for m in existing_mappings),
+                )
+            )
+
+        pending_row.value = [user for user in pending_users if user != email]
         db_session.commit()
 
-    # Also remove the user from pending users list
-    # Remove from pending users
-    pending_users = get_pending_users()
-    if email in pending_users:
-        pending_users.remove(email)
-        write_pending_users(pending_users)
+    token = CURRENT_TENANT_ID_CONTEXTVAR.set(tenant_id)
+    try:
+        # Rebuild the cached copy from the row committed above.
+        get_kv_store().load(KV_PENDING_USERS_KEY, refresh_cache=True)
 
-    # Add to invited users
-    invited_users = get_invited_users()
-    if email not in invited_users:
-        invited_users.append(email)
-        write_invited_users(invited_users)
+        invited_users = get_invited_users()
+        if email not in invited_users:
+            invited_users.append(email)
+            write_invited_users(invited_users)
+    finally:
+        CURRENT_TENANT_ID_CONTEXTVAR.reset(token)
 
 
 def accept_user_invite(email: str, tenant_id: str) -> None:
