@@ -56,6 +56,7 @@ def create_token(
             user_id=user.id,
             name=request.name,
             expiration_days=request.expiration_days,
+            authorized_is_verified=user.is_verified,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
