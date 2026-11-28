@@ -34,6 +34,8 @@ from onyx.auth.users import UserManager
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import Permission
 from onyx.db.models import User
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_store.file_store import get_default_file_store
 from onyx.server.utils import BasicAuthenticationError
 from onyx.utils.logger import setup_logger
@@ -69,6 +71,17 @@ async def refresh_access_token(
     user: User = Depends(current_user_with_expired_token),
     user_manager: UserManager = Depends(get_user_manager),
 ) -> None:
+    # The userinfo comes from the request body, so it may only describe the
+    # caller's own account.
+    userinfo_email = refresh_token.userinfo["email"]
+    if not isinstance(userinfo_email, str) or (
+        userinfo_email.lower() != user.email.lower()
+    ):
+        raise OnyxError(
+            OnyxErrorCode.UNAUTHORIZED,
+            "Token refresh is only allowed for the signed-in user",
+        )
+
     try:
         logger.debug(f"Received response from Meechum auth URL for user {user.id}")
 
@@ -87,10 +100,11 @@ async def refresh_access_token(
             oauth_name="custom",
             access_token=new_access_token,
             account_id=refresh_token.userinfo["userId"],
-            account_email=refresh_token.userinfo["email"],
+            account_email=user.email,
             expires_at=expires_at_timestamp,
             refresh_token=new_refresh_token,
             associate_by_email=True,
+            email_verified=True,
         )
 
         logger.info(f"Successfully refreshed tokens for user {user.id}")
