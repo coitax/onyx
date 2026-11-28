@@ -77,6 +77,12 @@ def _add_user_filters(
     if user.role == UserRole.ADMIN:
         return stmt
 
+    # Group membership only grants edit access to curators. Every other
+    # non-admin role (basic, limited, anonymous, ...) can only edit Personas
+    # they own.
+    if get_editable and user.role not in (UserRole.CURATOR, UserRole.GLOBAL_CURATOR):
+        return stmt.where(Persona.user_id == user.id)
+
     stmt = stmt.distinct()
     Persona__UG = aliased(Persona__UserGroup)
     User__UG = aliased(User__UserGroup)
