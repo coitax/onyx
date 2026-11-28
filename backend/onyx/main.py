@@ -644,13 +644,18 @@ def get_application(lifespan_override: Lifespan | None = None) -> FastAPI:
 
     application.add_exception_handler(ValueError, value_error_handler)
 
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=CORS_ALLOWED_ORIGIN,  # Configurable via environment variable
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    if CORS_ALLOWED_ORIGIN:
+        if "*" in CORS_ALLOWED_ORIGIN:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGIN must not contain '*' while credentials are allowed"
+            )
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=CORS_ALLOWED_ORIGIN,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     if LOG_ENDPOINT_LATENCY:
         add_latency_logging_middleware(application, logger)
 

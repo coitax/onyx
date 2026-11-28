@@ -13,6 +13,7 @@ from onyx.file_processing.enums import HtmlBasedConnectorTransformLinksStrategy
 from onyx.prompts.image_analysis import DEFAULT_IMAGE_SUMMARIZATION_SYSTEM_PROMPT
 from onyx.prompts.image_analysis import DEFAULT_IMAGE_SUMMARIZATION_USER_PROMPT
 from onyx.utils.logger import setup_logger
+from shared_configs.configs import parse_cors_origins
 
 logger = setup_logger()
 
@@ -1080,14 +1081,12 @@ MCP_SERVER_ENABLED = os.environ.get("MCP_SERVER_ENABLED", "").lower() == "true"
 MCP_SERVER_HOST = os.environ.get("MCP_SERVER_HOST", "0.0.0.0")
 MCP_SERVER_PORT = int(os.environ.get("MCP_SERVER_PORT") or 8090)
 
-# CORS origins for MCP clients (comma-separated)
-# Local dev: "http://localhost:*"
+# CORS origins for MCP clients (comma-separated). "*" is rejected because
+# credentials are allowed.
 # Production: "https://trusted-client.com,https://another-client.com"
-MCP_SERVER_CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get("MCP_SERVER_CORS_ORIGINS", "").split(",")
-    if origin.strip()
-]
+MCP_SERVER_CORS_ORIGINS = parse_cors_origins(
+    os.environ.get("MCP_SERVER_CORS_ORIGINS", "")
+)
 
 
 POD_NAME = os.environ.get("POD_NAME")
