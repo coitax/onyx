@@ -58,6 +58,9 @@ from fastapi_users.openapi import OpenAPIResponseType
 from fastapi_users.router.common import ErrorCode
 from fastapi_users.router.common import ErrorModel
 from fastapi_users_db_sqlalchemy import SQLAlchemyUserDatabase
+from httpx_oauth.clients.google import GoogleOAuth2
+from httpx_oauth.clients.openid import OpenID
+from httpx_oauth.exceptions import GetIdEmailError
 from httpx_oauth.integrations.fastapi import OAuth2AuthorizeCallback
 from httpx_oauth.oauth2 import BaseOAuth2
 from httpx_oauth.oauth2 import GetAccessTokenError
@@ -216,6 +219,13 @@ def generate_password() -> str:
     random.shuffle(password)
 
     return "".join(password)
+
+
+def _unverified_email_error() -> OnyxError:
+    return OnyxError(
+        OnyxErrorCode.UNAUTHENTICATED,
+        "The identity provider did not verify this email address",
+    )
 
 
 def user_needs_to_be_verified() -> bool:
@@ -656,10 +666,20 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
         *,
         associate_by_email: bool = False,
         is_verified_by_default: bool = False,
+        email_verified: bool = False,
     ) -> User:
+        """`email_verified` must only be True when the provider has attested
+        that `account_email` belongs to `account_id`. An unverified email is
+        never used to find, link, create, or provision anything; such a login
+        only succeeds for a subject that is already linked to a user."""
         referral_source = (
             getattr(request.state, "referral_source", None) if request else None
         )
+
+        # Tenant resolution by email can provision a tenant, so an unverified
+        # email must not reach it.
+        if not email_verified and MULTI_TENANT:
+            raise _unverified_email_error()
 
         tenant_id = await fetch_ee_implementation_or_noop(
             "onyx.server.tenants.provisioning",
@@ -706,6 +726,8 @@ class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
                 user = await self.get_by_oauth_account(oauth_name, account_id)
 
             except exceptions.UserNotExists:
+                if not email_verified:
+                    raise _unverified_email_error()
                 try:
                     # Attempt to get user by email
                     user = await self.user_db.get_by_email(account_email)
@@ -1865,6 +1887,44 @@ def get_pkce_cookie_name(state: str) -> str:
     return f"{PKCE_COOKIE_NAME_PREFIX}_{state_hash}"
 
 
+async def get_oauth_identity(
+    oauth_client: BaseOAuth2, access_token: str
+) -> tuple[str, str | None, bool]:
+    """Return (account_id, account_email, email_verified) for an access token.
+
+    For OpenID providers the subject, email, and verification flag all come
+    from a single userinfo response, and the email only counts as verified
+    when `email_verified` is the JSON boolean `true`.
+    """
+    if isinstance(oauth_client, OpenID):
+        async with oauth_client.get_httpx_client() as client:
+            response = await client.get(
+                oauth_client.openid_configuration["userinfo_endpoint"],
+                headers={
+                    **oauth_client.request_headers,
+                    "Authorization": f"Bearer {access_token}",
+                },
+            )
+            if response.status_code >= 400:
+                raise GetIdEmailError(response=response)
+            userinfo: dict[str, Any] = response.json()
+
+        email = userinfo.get("email")
+        return (
+            str(userinfo["sub"]),
+            email if isinstance(email, str) else None,
+            userinfo.get("email_verified") is True,
+        )
+
+    if isinstance(oauth_client, GoogleOAuth2):
+        # Google returns the account's primary email, which Google owns.
+        account_id, account_email = await oauth_client.get_id_email(access_token)
+        return account_id, account_email, True
+
+    account_id, account_email = await oauth_client.get_id_email(access_token)
+    return account_id, account_email, False
+
+
 # refer to https://github.com/fastapi-users/fastapi-users/blob/42ddc241b965475390e2bce887b084152ae1a2cd/fastapi_users/fastapi_users.py#L91
 def create_onyx_oauth_router(
     oauth_client: BaseOAuth2,
@@ -2060,7 +2120,7 @@ def get_oauth_router(
         code: Optional[str] = None,
         state: Optional[str] = None,
         error: Optional[str] = None,
-        user_manager: BaseUserManager[models.UP, models.ID] = Depends(get_user_manager),
+        user_manager: UserManager = Depends(get_user_manager),
         strategy: Strategy[models.UP, models.ID] = Depends(backend.get_strategy),
     ) -> Response:
         pkce_cookie_name: str | None = None
@@ -2209,8 +2269,8 @@ def get_oauth_router(
         async def complete_login_flow(
             token: OAuth2Token, state_data: Dict[str, str]
         ) -> RedirectResponse:
-            account_id, account_email = await oauth_client.get_id_email(
-                token["access_token"]
+            account_id, account_email, email_verified = await get_oauth_identity(
+                oauth_client, token["access_token"]
             )
 
             if account_email is None:
@@ -2218,6 +2278,10 @@ def get_oauth_router(
                     OnyxErrorCode.VALIDATION_ERROR,
                     ErrorCode.OAUTH_NOT_AVAILABLE_EMAIL,
                 )
+
+            # The tenant lookup below can reactivate a tenant mapping.
+            if not email_verified and MULTI_TENANT:
+                raise _unverified_email_error()
 
             next_url = state_data.get("next_url", "/")
             referral_source = state_data.get("referral_source", None)
@@ -2242,6 +2306,7 @@ def get_oauth_router(
                     request,
                     associate_by_email=associate_by_email,
                     is_verified_by_default=is_verified_by_default,
+                    email_verified=email_verified,
                 )
             except UserAlreadyExists:
                 raise OnyxError(
