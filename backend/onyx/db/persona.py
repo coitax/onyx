@@ -900,6 +900,50 @@ def _mark_files_need_persona_sync(
     )
 
 
+def _fetch_attachable_user_files(
+    db_session: Session,
+    user_file_ids: list[UUID],
+    user: User | None,
+    existing_persona: Persona | None,
+) -> list[UserFile]:
+    """Load the user files a persona upsert may attach, raising if any
+    requested id is unknown or not attachable.
+
+    A persona may only hold files owned by the persona's owner. When a user is
+    acting, each file must also be owned by that user or already be attached
+    to the persona, so editors cannot pull in files they cannot read.
+    `user=None` is reserved for trusted system operations."""
+    requested_ids = set(user_file_ids)
+    if not requested_ids:
+        return []
+
+    stmt = select(UserFile).where(UserFile.id.in_(requested_ids))
+    if user is not None:
+        persona_owner_id = (
+            existing_persona.user_id if existing_persona is not None else user.id
+        )
+        already_attached_ids = (
+            {uf.id for uf in existing_persona.user_files}
+            if existing_persona is not None
+            else set()
+        )
+        if persona_owner_id is None:
+            stmt = stmt.where(UserFile.user_id.is_(None))
+        else:
+            stmt = stmt.where(UserFile.user_id == persona_owner_id)
+        stmt = stmt.where(
+            or_(
+                UserFile.user_id == user.id,
+                UserFile.id.in_(already_attached_ids),
+            )
+        )
+
+    user_files = list(db_session.execute(stmt).scalars().all())
+    if len(user_files) != len(requested_ids):
+        raise ValueError("Some user files were not found")
+    return user_files
+
+
 def upsert_persona(
     user: User | None,
     name: str,
@@ -983,11 +1027,12 @@ def upsert_persona(
     # Fetch and attach user_files by IDs
     user_files = None
     if user_file_ids is not None:
-        user_files = (
-            db_session.query(UserFile).filter(UserFile.id.in_(user_file_ids)).all()
+        user_files = _fetch_attachable_user_files(
+            db_session=db_session,
+            user_file_ids=user_file_ids,
+            user=user,
+            existing_persona=existing_persona,
         )
-        if not user_files and user_file_ids:
-            raise ValueError("user_files not found")
 
     labels = None
     if label_ids is not None:
