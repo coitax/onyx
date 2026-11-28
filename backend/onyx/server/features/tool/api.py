@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from onyx.auth.permissions import get_effective_permissions
 from onyx.auth.permissions import require_permission
 from onyx.auth.schemas import UserRole
 from onyx.auth.users import current_curator_or_admin_user
@@ -14,12 +15,15 @@ from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import Permission
 from onyx.db.models import Tool
 from onyx.db.models import User
+from onyx.db.oauth_config import get_oauth_config
 from onyx.db.tools import create_tool__no_commit
 from onyx.db.tools import delete_tool__no_commit
 from onyx.db.tools import get_tool_by_id
 from onyx.db.tools import get_tools
 from onyx.db.tools import get_tools_by_ids
 from onyx.db.tools import update_tool
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.server.features.tool.models import CustomToolCreate
 from onyx.server.features.tool.models import CustomToolUpdate
 from onyx.server.features.tool.models import ToolSnapshot
@@ -80,6 +84,31 @@ def _get_editable_custom_tool(tool_id: int, db_session: Session, user: User) -> 
     return tool
 
 
+def _validate_oauth_config_access(
+    oauth_config_id: int | None,
+    db_session: Session,
+    user: User,
+    current_oauth_config_id: int | None = None,
+) -> None:
+    """Ensure a non-admin only attaches OAuth configs they created.
+
+    A tool that references an OAuth config receives every authorized user's
+    token for it, and detaching the last tool deletes the config.
+    """
+    if oauth_config_id is None or oauth_config_id == current_oauth_config_id:
+        return
+
+    if Permission.FULL_ADMIN_PANEL_ACCESS in get_effective_permissions(user):
+        return
+
+    oauth_config = get_oauth_config(oauth_config_id, db_session)
+    if oauth_config is None or oauth_config.user_id != user.id:
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            "You can only use OAuth configurations that you created.",
+        )
+
+
 @admin_router.post("/custom", tags=PUBLIC_API_TAGS)
 def create_custom_tool(
     tool_data: CustomToolCreate,
@@ -88,6 +117,7 @@ def create_custom_tool(
 ) -> ToolSnapshot:
     _validate_tool_definition(tool_data.definition)
     _validate_auth_settings(tool_data)
+    _validate_oauth_config_access(tool_data.oauth_config_id, db_session, user)
     tool = create_tool__no_commit(
         name=tool_data.name,
         description=tool_data.description,
@@ -114,6 +144,12 @@ def update_custom_tool(
     if tool_data.definition:
         _validate_tool_definition(tool_data.definition)
     _validate_auth_settings(tool_data)
+    _validate_oauth_config_access(
+        tool_data.oauth_config_id,
+        db_session,
+        user,
+        current_oauth_config_id=existing_tool.oauth_config_id,
+    )
     updated_tool = update_tool(
         tool_id=tool_id,
         name=tool_data.name,
