@@ -3360,6 +3360,11 @@ class OAuthConfig(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
 
+    # User who created the config. NULL means only admins may modify it.
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+
     # OAuth provider endpoints
     authorization_url: Mapped[str] = mapped_column(Text, nullable=False)
     token_url: Mapped[str] = mapped_column(Text, nullable=False)

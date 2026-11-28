@@ -16,6 +16,7 @@ from onyx.db.oauth_config import create_oauth_config
 from onyx.db.oauth_config import delete_oauth_config
 from onyx.db.oauth_config import delete_user_oauth_token
 from onyx.db.oauth_config import get_oauth_config
+from onyx.db.oauth_config import get_oauth_config_for_update
 from onyx.db.oauth_config import get_oauth_configs
 from onyx.db.oauth_config import get_tools_by_oauth_config
 from onyx.db.oauth_config import get_user_oauth_token
@@ -120,7 +121,7 @@ class TestOAuthConfigCRUD:
         # Update the config with unique name
         new_name = f"Updated GitHub OAuth {uuid4().hex[:8]}"
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             name=new_name,
             scopes=["repo", "user", "admin"],
@@ -140,7 +141,7 @@ class TestOAuthConfigCRUD:
         # Update config without providing client_id or client_secret
         new_name = f"Updated Name {uuid4().hex[:8]}"
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             name=new_name,
             client_id=None,
@@ -161,12 +162,9 @@ class TestOAuthConfigCRUD:
         # But name should be updated
         assert updated_config.name == new_name
 
-    def test_update_oauth_config_not_found(self, db_session: Session) -> None:
-        """Test updating a non-existent OAuth config raises error"""
-        with pytest.raises(
-            ValueError, match="OAuth config with id 99999 does not exist"
-        ):
-            update_oauth_config(99999, db_session, name="New Name")
+    def test_get_oauth_config_for_update_not_found(self, db_session: Session) -> None:
+        """Test locking a non-existent OAuth config returns None"""
+        assert get_oauth_config_for_update(99999, db_session) is None
 
     def test_update_oauth_config_clear_client_id(self, db_session: Session) -> None:
         """Test clearing client_id while preserving client_secret"""
@@ -175,7 +173,7 @@ class TestOAuthConfigCRUD:
 
         # Clear client_id
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             clear_client_id=True,
         )
@@ -197,7 +195,7 @@ class TestOAuthConfigCRUD:
 
         # Clear client_secret
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             clear_client_secret=True,
         )
@@ -218,7 +216,7 @@ class TestOAuthConfigCRUD:
 
         # Clear both secrets
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             clear_client_id=True,
             clear_client_secret=True,
@@ -236,9 +234,10 @@ class TestOAuthConfigCRUD:
         new_auth_url = "https://example.com/oauth/authorize"
 
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             authorization_url=new_auth_url,
+            client_secret="new_client_secret",
         )
 
         assert updated_config.authorization_url == new_auth_url
@@ -249,12 +248,79 @@ class TestOAuthConfigCRUD:
         new_token_url = "https://example.com/oauth/token"
 
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             token_url=new_token_url,
+            client_secret="new_client_secret",
         )
 
         assert updated_config.token_url == new_token_url
+
+    @pytest.mark.parametrize("field", ["authorization_url", "token_url"])
+    def test_update_oauth_config_url_requires_new_secret(
+        self, db_session: Session, field: str
+    ) -> None:
+        """Test that changing a URL without re-entering the secret is refused"""
+        oauth_config = _create_test_oauth_config(db_session)
+        original_url = getattr(oauth_config, field)
+        new_url = "https://example.com/oauth/changed"
+
+        with pytest.raises(ValueError, match="client secret must be re-entered"):
+            update_oauth_config(
+                oauth_config,
+                db_session,
+                authorization_url=new_url if field == "authorization_url" else None,
+                token_url=new_url if field == "token_url" else None,
+            )
+
+        db_session.refresh(oauth_config)
+        assert getattr(oauth_config, field) == original_url
+
+    def test_update_oauth_config_unchanged_url_does_not_require_secret(
+        self, db_session: Session
+    ) -> None:
+        """Test that resending the current URLs keeps secrets and user tokens"""
+        oauth_config = _create_test_oauth_config(db_session)
+        user = create_test_user(db_session, "unchanged_url_user")
+        upsert_user_oauth_token(
+            oauth_config.id, user.id, {"access_token": "token"}, db_session
+        )
+
+        update_oauth_config(
+            oauth_config,
+            db_session,
+            authorization_url=oauth_config.authorization_url,
+            token_url=oauth_config.token_url,
+            scopes=["repo"],
+        )
+
+        assert oauth_config.scopes == ["repo"]
+        assert get_user_oauth_token(oauth_config.id, user.id, db_session) is not None
+
+    def test_update_oauth_config_url_change_deletes_user_tokens(
+        self, db_session: Session
+    ) -> None:
+        """Test that changing a URL deletes every user's stored token"""
+        oauth_config = _create_test_oauth_config(db_session)
+        other_config = _create_test_oauth_config(db_session)
+        user = create_test_user(db_session, "url_change_user")
+        upsert_user_oauth_token(
+            oauth_config.id, user.id, {"access_token": "token"}, db_session
+        )
+        upsert_user_oauth_token(
+            other_config.id, user.id, {"access_token": "token"}, db_session
+        )
+
+        update_oauth_config(
+            oauth_config,
+            db_session,
+            token_url="https://example.com/oauth/token",
+            client_secret="new_client_secret",
+        )
+
+        db_session.expire_all()
+        assert get_user_oauth_token(oauth_config.id, user.id, db_session) is None
+        assert get_user_oauth_token(other_config.id, user.id, db_session) is not None
 
     def test_update_oauth_config_additional_params(self, db_session: Session) -> None:
         """Test updating additional_params"""
@@ -262,7 +328,7 @@ class TestOAuthConfigCRUD:
         new_params = {"access_type": "offline", "prompt": "consent"}
 
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             additional_params=new_params,
         )
@@ -280,7 +346,7 @@ class TestOAuthConfigCRUD:
         new_client_id = "new_client_id"
 
         updated_config = update_oauth_config(
-            oauth_config.id,
+            oauth_config,
             db_session,
             name=new_name,
             authorization_url=new_auth_url,
@@ -288,6 +354,7 @@ class TestOAuthConfigCRUD:
             scopes=new_scopes,
             additional_params=new_params,
             client_id=new_client_id,
+            client_secret="new_client_secret",
         )
 
         assert updated_config.name == new_name
@@ -304,18 +371,11 @@ class TestOAuthConfigCRUD:
         config_id = oauth_config.id
 
         # Delete the config
-        delete_oauth_config(config_id, db_session)
+        delete_oauth_config(oauth_config, db_session)
 
         # Verify it's deleted
         deleted_config = get_oauth_config(config_id, db_session)
         assert deleted_config is None
-
-    def test_delete_oauth_config_not_found(self, db_session: Session) -> None:
-        """Test deleting a non-existent OAuth config raises error"""
-        with pytest.raises(
-            ValueError, match="OAuth config with id 99999 does not exist"
-        ):
-            delete_oauth_config(99999, db_session)
 
     def test_delete_oauth_config_sets_tool_reference_to_null(
         self, db_session: Session
@@ -327,7 +387,7 @@ class TestOAuthConfigCRUD:
         assert tool.oauth_config_id == oauth_config.id
 
         # Delete the OAuth config
-        delete_oauth_config(oauth_config.id, db_session)
+        delete_oauth_config(oauth_config, db_session)
 
         # Refresh tool from database
         db_session.refresh(tool)
@@ -567,7 +627,7 @@ class TestOAuthUserTokenCRUD:
         )
 
         # Delete the OAuth config
-        delete_oauth_config(oauth_config.id, db_session)
+        delete_oauth_config(oauth_config, db_session)
 
         # User tokens should be deleted
         token1 = get_user_oauth_token(oauth_config.id, user1.id, db_session)
