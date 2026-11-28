@@ -527,6 +527,8 @@ export default function OpenAPIAuthenticationModal({
                           {isEditingOAuthConfig && (
                             <FormField.Description>
                               Leave blank to keep the current client secret.
+                              Required if you change the authorization or token
+                              URL.
                             </FormField.Description>
                           )}
                           <FormField.Message

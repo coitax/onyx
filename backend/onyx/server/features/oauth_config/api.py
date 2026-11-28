@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from onyx.auth.oauth_token_manager import OAuthTokenManager
+from onyx.auth.permissions import get_effective_permissions
 from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_curator_or_admin_user
 from onyx.configs.app_configs import WEB_DOMAIN
@@ -17,10 +18,13 @@ from onyx.db.oauth_config import create_oauth_config
 from onyx.db.oauth_config import delete_oauth_config
 from onyx.db.oauth_config import delete_user_oauth_token
 from onyx.db.oauth_config import get_oauth_config
+from onyx.db.oauth_config import get_oauth_config_for_update
 from onyx.db.oauth_config import get_oauth_configs
 from onyx.db.oauth_config import get_tools_by_oauth_config
 from onyx.db.oauth_config import update_oauth_config
 from onyx.db.oauth_config import upsert_user_oauth_token
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.federated_connectors.oauth_utils import generate_oauth_state
 from onyx.federated_connectors.oauth_utils import verify_oauth_state
 from onyx.server.features.oauth_config.models import OAuthCallbackResponse
@@ -57,6 +61,30 @@ def _oauth_config_to_snapshot(
     )
 
 
+def _get_editable_oauth_config(
+    oauth_config_id: int, db_session: Session, user: User
+) -> OAuthConfig:
+    """Fetch and lock an OAuth config, ensuring the caller may modify it."""
+    oauth_config = get_oauth_config_for_update(oauth_config_id, db_session)
+    if oauth_config is None:
+        raise OnyxError(
+            OnyxErrorCode.NOT_FOUND,
+            f"OAuth config with id {oauth_config_id} not found",
+        )
+
+    # Admins can always make changes; non-admins must own the config.
+    if Permission.FULL_ADMIN_PANEL_ACCESS in get_effective_permissions(user):
+        return oauth_config
+
+    if oauth_config.user_id is None or oauth_config.user_id != user.id:
+        raise OnyxError(
+            OnyxErrorCode.INSUFFICIENT_PERMISSIONS,
+            "You can only modify OAuth configurations that you created.",
+        )
+
+    return oauth_config
+
+
 """Admin endpoints for OAuth configuration management"""
 
 
@@ -64,9 +92,9 @@ def _oauth_config_to_snapshot(
 def create_oauth_config_endpoint(
     oauth_data: OAuthConfigCreate,
     db_session: Session = Depends(get_session),
-    _: User = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),
 ) -> OAuthConfigSnapshot:
-    """Create a new OAuth configuration (admin only)."""
+    """Create a new OAuth configuration owned by the caller."""
     try:
         oauth_config = create_oauth_config(
             name=oauth_data.name,
@@ -77,6 +105,7 @@ def create_oauth_config_endpoint(
             scopes=oauth_data.scopes,
             additional_params=oauth_data.additional_params,
             db_session=db_session,
+            user_id=user.id,
         )
         return _oauth_config_to_snapshot(oauth_config, db_session)
     except ValueError as e:
@@ -113,12 +142,13 @@ def update_oauth_config_endpoint(
     oauth_config_id: int,
     oauth_data: OAuthConfigUpdate,
     db_session: Session = Depends(get_session),
-    _: User = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),
 ) -> OAuthConfigSnapshot:
-    """Update an OAuth configuration (admin only)."""
+    """Update an OAuth configuration (admins, or the config's creator)."""
+    oauth_config = _get_editable_oauth_config(oauth_config_id, db_session, user)
     try:
         updated_config = update_oauth_config(
-            oauth_config_id=oauth_config_id,
+            oauth_config=oauth_config,
             db_session=db_session,
             name=oauth_data.name,
             authorization_url=oauth_data.authorization_url,
@@ -132,21 +162,19 @@ def update_oauth_config_endpoint(
         )
         return _oauth_config_to_snapshot(updated_config, db_session)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise OnyxError(OnyxErrorCode.INVALID_INPUT, str(e))
 
 
 @admin_router.delete("/{oauth_config_id}")
 def delete_oauth_config_endpoint(
     oauth_config_id: int,
     db_session: Session = Depends(get_session),
-    _: User = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),
 ) -> dict[str, str]:
-    """Delete an OAuth configuration (admin only)."""
-    try:
-        delete_oauth_config(oauth_config_id, db_session)
-        return {"message": "OAuth configuration deleted successfully"}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    """Delete an OAuth configuration (admins, or the config's creator)."""
+    oauth_config = _get_editable_oauth_config(oauth_config_id, db_session, user)
+    delete_oauth_config(oauth_config, db_session)
+    return {"message": "OAuth configuration deleted successfully"}
 
 
 """User endpoints for OAuth flow"""

@@ -1,6 +1,7 @@
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,10 +26,12 @@ def create_oauth_config(
     scopes: list[str] | None,
     additional_params: dict[str, str] | None,
     db_session: Session,
+    user_id: UUID | None = None,
 ) -> OAuthConfig:
     """Create a new OAuth configuration"""
     oauth_config = OAuthConfig(
         name=name,
+        user_id=user_id,
         authorization_url=authorization_url,
         token_url=token_url,
         client_id=client_id,
@@ -48,13 +51,22 @@ def get_oauth_config(oauth_config_id: int, db_session: Session) -> OAuthConfig |
     )
 
 
+def get_oauth_config_for_update(
+    oauth_config_id: int, db_session: Session
+) -> OAuthConfig | None:
+    """Get OAuth configuration by ID, locking the row until the transaction ends"""
+    return db_session.scalar(
+        select(OAuthConfig).where(OAuthConfig.id == oauth_config_id).with_for_update()
+    )
+
+
 def get_oauth_configs(db_session: Session) -> list[OAuthConfig]:
     """Get all OAuth configurations"""
     return list(db_session.scalars(select(OAuthConfig)).all())
 
 
 def update_oauth_config(
-    oauth_config_id: int,
+    oauth_config: OAuthConfig,
     db_session: Session,
     name: str | None = None,
     authorization_url: str | None = None,
@@ -72,12 +84,30 @@ def update_oauth_config(
     NOTE: If client_id or client_secret are None, existing values are preserved.
     To clear these values, set clear_client_id or clear_client_secret to True.
     This allows partial updates without re-entering secrets.
+
+    Changing authorization_url or token_url requires a new client_secret, since
+    the stored secret would otherwise be sent to the new endpoint. It also
+    deletes every user's stored token for this config, so no existing refresh
+    token is ever sent to the new endpoint.
+
+    Raises ValueError if a URL changes without a new client_secret.
     """
-    oauth_config = db_session.scalar(
-        select(OAuthConfig).where(OAuthConfig.id == oauth_config_id)
-    )
-    if oauth_config is None:
-        raise ValueError(f"OAuth config with id {oauth_config_id} does not exist")
+    urls_changed = (
+        authorization_url is not None
+        and authorization_url != oauth_config.authorization_url
+    ) or (token_url is not None and token_url != oauth_config.token_url)
+    if urls_changed and (clear_client_secret or not client_secret):
+        raise ValueError(
+            "The client secret must be re-entered when changing the "
+            "authorization URL or token URL"
+        )
+
+    if urls_changed:
+        db_session.execute(
+            delete(OAuthUserToken).where(
+                OAuthUserToken.oauth_config_id == oauth_config.id
+            )
+        )
 
     # Update only provided fields
     if name is not None:
@@ -103,19 +133,13 @@ def update_oauth_config(
     return oauth_config
 
 
-def delete_oauth_config(oauth_config_id: int, db_session: Session) -> None:
+def delete_oauth_config(oauth_config: OAuthConfig, db_session: Session) -> None:
     """
     Delete OAuth configuration.
 
     Sets oauth_config_id to NULL for associated tools due to SET NULL foreign key.
     Cascades delete to user tokens.
     """
-    oauth_config = db_session.scalar(
-        select(OAuthConfig).where(OAuthConfig.id == oauth_config_id)
-    )
-    if oauth_config is None:
-        raise ValueError(f"OAuth config with id {oauth_config_id} does not exist")
-
     db_session.delete(oauth_config)
     db_session.commit()
 

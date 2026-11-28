@@ -16,6 +16,10 @@ from onyx.utils.sensitive import SensitiveValue
 
 logger = setup_logger()
 
+# Stored alongside each user's token so a refresh token is only ever sent back
+# to the token URL that issued it, even if the config's URL changes mid-refresh.
+ISSUING_TOKEN_URL_KEY = "onyx_issuing_token_url"
+
 
 class OAuthTokenManager:
     """Manages OAuth token retrieval, refresh, and validation"""
@@ -68,6 +72,17 @@ class OAuthTokenManager:
 
         token_data = self._unwrap_token_data(user_token.token_data)
 
+        # Tokens stored before issuing token URLs were recorded have no entry.
+        issuing_token_url = token_data.get(ISSUING_TOKEN_URL_KEY)
+        if (
+            issuing_token_url is not None
+            and issuing_token_url != self.oauth_config.token_url
+        ):
+            raise ValueError(
+                "Stored token was issued by a different token URL than the "
+                "OAuth config's current one"
+            )
+
         data: dict[str, str] = {
             "grant_type": "refresh_token",
             "refresh_token": token_data["refresh_token"],
@@ -94,6 +109,8 @@ class OAuthTokenManager:
         # Preserve refresh_token if not returned (some providers don't return it)
         if "refresh_token" not in new_token_data and "refresh_token" in token_data:
             new_token_data["refresh_token"] = token_data["refresh_token"]
+
+        new_token_data[ISSUING_TOKEN_URL_KEY] = self.oauth_config.token_url
 
         # Update token in DB
         upsert_user_oauth_token(
@@ -155,6 +172,8 @@ class OAuthTokenManager:
         # Calculate expires_at if expires_in is present
         if "expires_in" in token_data:
             token_data["expires_at"] = int(time.time()) + token_data["expires_in"]
+
+        token_data[ISSUING_TOKEN_URL_KEY] = self.oauth_config.token_url
 
         return token_data
 
