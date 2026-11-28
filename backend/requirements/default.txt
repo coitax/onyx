@@ -599,7 +599,7 @@ prometheus-client==0.23.1
     # via
     #   onyx
     #   prometheus-fastapi-instrumentator
-prometheus-fastapi-instrumentator==7.1.0
+prometheus-fastapi-instrumentator==8.1.0
     # via onyx
 prompt-toolkit==3.0.52
     # via click-repl
@@ -884,7 +884,7 @@ sse-starlette==3.0.3
     # via mcp
 sseclient-py==1.8.0
     # via braintrust
-starlette==0.49.3
+starlette==1.0.1
     # via
     #   fastapi
     #   mcp

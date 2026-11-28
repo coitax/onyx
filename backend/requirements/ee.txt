@@ -186,7 +186,7 @@ prometheus-client==0.23.1
     # via
     #   onyx
     #   prometheus-fastapi-instrumentator
-prometheus-fastapi-instrumentator==7.1.0
+prometheus-fastapi-instrumentator==8.1.0
     # via onyx
 propcache==0.4.1
     # via
@@ -278,7 +278,7 @@ sniffio==1.3.1
     #   openai
 sse-starlette==3.0.3
     # via mcp
-starlette==0.49.3
+starlette==1.0.1
     # via
     #   fastapi
     #   mcp
