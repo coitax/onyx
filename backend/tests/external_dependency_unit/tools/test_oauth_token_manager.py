@@ -16,6 +16,7 @@ from requests import HTTPError
 from requests import Response
 from sqlalchemy.orm import Session
 
+from onyx.auth.oauth_token_manager import ISSUING_TOKEN_URL_KEY
 from onyx.auth.oauth_token_manager import OAuthTokenManager
 from onyx.db.models import OAuthConfig
 from onyx.db.oauth_config import create_oauth_config
@@ -172,6 +173,63 @@ class TestOAuthTokenManagerValidation:
         access_token = manager.get_valid_access_token()
 
         assert access_token is None
+
+    @patch("onyx.auth.oauth_token_manager.requests.post")
+    def test_refresh_skipped_when_issuing_token_url_differs(
+        self, mock_post: Mock, db_session: Session
+    ) -> None:
+        """Test that a refresh token is never sent to a token URL that didn't issue it"""
+        oauth_config = _create_test_oauth_config(db_session)
+        user = create_test_user(db_session, "oauth_user")
+
+        token_data = {
+            "access_token": "expired_token",
+            "refresh_token": "refresh_token",
+            "expires_at": int(time.time()) - 100,
+            ISSUING_TOKEN_URL_KEY: "https://other.example.com/token",
+        }
+        upsert_user_oauth_token(oauth_config.id, user.id, token_data, db_session)
+
+        manager = OAuthTokenManager(oauth_config, user.id, db_session)
+        access_token = manager.get_valid_access_token()
+
+        assert access_token is None
+        mock_post.assert_not_called()
+
+    @patch("onyx.auth.oauth_token_manager.requests.post")
+    def test_refreshed_token_records_issuing_token_url(
+        self, mock_post: Mock, db_session: Session
+    ) -> None:
+        """Test that a refreshed token records the token URL that issued it"""
+        oauth_config = _create_test_oauth_config(db_session)
+        user = create_test_user(db_session, "oauth_user")
+
+        token_data = {
+            "access_token": "expired_token",
+            "refresh_token": "refresh_token",
+            "expires_at": int(time.time()) - 100,
+            ISSUING_TOKEN_URL_KEY: oauth_config.token_url,
+        }
+        user_token = upsert_user_oauth_token(
+            oauth_config.id, user.id, token_data, db_session
+        )
+
+        mock_response = Mock(spec=Response)
+        mock_response.json.return_value = {
+            "access_token": "new_access_token",
+            "expires_in": 3600,
+            ISSUING_TOKEN_URL_KEY: "https://other.example.com/token",
+        }
+        mock_response.raise_for_status = Mock()
+        mock_post.return_value = mock_response
+
+        manager = OAuthTokenManager(oauth_config, user.id, db_session)
+        assert manager.get_valid_access_token() == "new_access_token"
+
+        db_session.refresh(user_token)
+        assert user_token.token_data is not None
+        stored = user_token.token_data.get_value(apply_mask=False)
+        assert stored[ISSUING_TOKEN_URL_KEY] == oauth_config.token_url
 
 
 class TestOAuthTokenManagerRefresh:
